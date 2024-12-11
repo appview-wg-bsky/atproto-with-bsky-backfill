@@ -20,6 +20,15 @@ type RecordProcessorParams<T, S> = {
     obj: T,
     timestamp: string,
   ) => Promise<S | null>
+  insertBulkFn: (
+    db: DatabaseSchema,
+    records: Array<{
+      uri: AtUri
+      cid: CID
+      obj: T
+      timestamp: string
+    }>,
+  ) => Promise<S[]>
   findDuplicate: (
     db: DatabaseSchema,
     uri: AtUri,
@@ -32,6 +41,7 @@ type RecordProcessorParams<T, S> = {
     replacedBy: S | null,
   ) => { notifs: Notif[]; toDelete: string[] }
   updateAggregates?: (db: DatabaseSchema, obj: S) => Promise<void>
+  updateAggregatesBulk?: (db: DatabaseSchema, objs: S[]) => Promise<void>
 }
 
 type Notif = Insertable<Notification>
@@ -107,6 +117,67 @@ export class RecordProcessor<T, S> {
         })
         .onConflict((oc) => oc.doNothing())
         .execute()
+    }
+  }
+
+  async insertBulkRecords(
+    records: Array<{
+      uri: AtUri
+      cid: string
+      obj: unknown
+      timestamp: string
+    }>,
+    opts?: { disableNotifs?: boolean },
+  ) {
+    records.forEach(({ obj }) => this.assertValidRecord(obj))
+    await this.db
+      .insertInto('record')
+      .values(
+        records.map(({ uri, cid, obj, timestamp }) => ({
+          uri: uri.toString(),
+          cid: cid.toString(),
+          did: uri.host,
+          json: stringifyLex(obj),
+          indexedAt: timestamp,
+        })),
+      )
+      .onConflict((oc) => oc.doNothing())
+      .execute()
+
+    const insertedPosts = await this.params.insertBulkFn(
+      this.db,
+      records as any, // `records.obj` is expected to be T but is unknown; we know it's T due to the assertValidRecord call above
+    )
+    this.aggregateOnCommitBulk(insertedPosts)
+
+    for (const inserted of insertedPosts) {
+      const record = records.find(
+        // We don't know for sure that `inserted` has a uri, but as far as I can tell every existing plugin does
+        // except for chat-declaration.ts, which doesn't require notifs anyways
+        (r) => r.uri.toString() === (inserted as any)?.uri,
+      )
+      if (!record) continue
+
+      if (!opts?.disableNotifs) {
+        await this.handleNotifs({ inserted })
+      }
+
+      const dupe = await this.params.findDuplicate(
+        this.db,
+        record.uri,
+        record.obj as T, // see previous comment on `records as any` assertion
+      )
+      if (dupe) {
+        await this.db
+          .updateTable('duplicate_record')
+          .where('uri', '=', record.uri.toString())
+          .set({
+            cid: record.cid,
+            duplicateOf: dupe.toString(),
+            indexedAt: record.timestamp,
+          })
+          .execute()
+      }
     }
   }
 
@@ -289,6 +360,14 @@ export class RecordProcessor<T, S> {
     if (!updateAggregates) return
     this.appDb.onCommit(() => {
       this.background.add((db) => updateAggregates(db.db, indexed))
+    })
+  }
+
+  aggregateOnCommitBulk(indexed: S[]) {
+    const { updateAggregatesBulk } = this.params
+    if (!updateAggregatesBulk) return
+    this.appDb.onCommit(() => {
+      this.background.add((db) => updateAggregatesBulk(db.db, indexed))
     })
   }
 }

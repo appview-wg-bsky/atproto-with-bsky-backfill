@@ -1,4 +1,4 @@
-import { Insertable, Selectable, sql } from 'kysely'
+import { Insertable, InsertObject, Selectable, sql } from 'kysely'
 import { CID } from 'multiformats/cid'
 import { jsonStringToLex } from '@atproto/lexicon'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
@@ -287,6 +287,304 @@ const insertFn = async (
   }
 }
 
+const insertBulkFn = async (
+  db: DatabaseSchema,
+  records: Array<{
+    uri: AtUri
+    cid: CID
+    obj: PostRecord
+    timestamp: string
+  }>,
+): Promise<IndexedPost[]> => {
+  const posts = records.map(({ uri, cid, obj, timestamp }) => ({
+    uri: uri.toString(),
+    cid: cid.toString(),
+    creator: uri.host,
+    text: obj.text,
+    createdAt: normalizeDatetimeAlways(obj.createdAt),
+    replyRoot: obj.reply?.root?.uri || null,
+    replyRootCid: obj.reply?.root?.cid || null,
+    replyParent: obj.reply?.parent?.uri || null,
+    replyParentCid: obj.reply?.parent?.cid || null,
+    langs: obj.langs?.length
+      ? sql<string[]>`${JSON.stringify(obj.langs)}` // sidesteps kysely's array serialization, which is non-jsonb
+      : null,
+    tags: obj.tags?.length
+      ? sql<string[]>`${JSON.stringify(obj.tags)}` // sidesteps kysely's array serialization, which is non-jsonb
+      : null,
+    indexedAt: timestamp,
+  }))
+
+  const [insertedPosts] = await Promise.all([
+    db
+      .insertInto('post')
+      .values(posts)
+      .onConflict((oc) => oc.doNothing())
+      .returningAll()
+      .execute(),
+    db
+      .insertInto('feed_item')
+      .values(
+        posts.map((p) => ({
+          type: 'post' as const,
+          uri: p.uri,
+          cid: p.cid,
+          postUri: p.uri,
+          originatorDid: p.creator,
+          sortAt: p.indexedAt < p.createdAt ? p.indexedAt : p.createdAt,
+        })),
+      )
+      .onConflict((oc) => oc.doNothing())
+      .execute(),
+  ])
+  if (!insertedPosts.length) {
+    return []
+  }
+
+  const invalidReplyUpdates = await Promise.all(
+    insertedPosts.map(async (insertedPost) => {
+      if (insertedPost.replyParent || insertedPost.replyRoot) {
+        const { invalidReplyRoot, violatesThreadGate } = await validateReply(
+          db,
+          insertedPost.creator,
+          {
+            parent: {
+              uri: insertedPost.replyParent ?? '',
+              cid: insertedPost.replyParentCid ?? '',
+            },
+            root: {
+              uri: insertedPost.replyRoot ?? '',
+              cid: insertedPost.replyRootCid ?? '',
+            },
+          },
+        )
+
+        if (invalidReplyRoot || violatesThreadGate) {
+          Object.assign(insertedPost, { invalidReplyRoot, violatesThreadGate })
+          return [
+            insertedPost.uri,
+            { invalidReplyRoot, violatesThreadGate },
+          ] as const
+        }
+      }
+    }),
+  )
+
+  await sql`
+    UPDATE post
+    SET invalidReplyRoot = p.invalidReplyRoot,
+        violatesThreadGate = p.violatesThreadGate
+    FROM (VALUES ${invalidReplyUpdates
+      .filter((u) => !!u)
+      .map(
+        ([uri, update]) =>
+          `(${uri}, ${update.invalidReplyRoot}, ${update.violatesThreadGate})`,
+      )
+      .join(', ')}) p(uri, invalidReplyRoot, violatesThreadGate)
+    WHERE post.uri = p.uri;
+  `.execute(db)
+
+  const facets: Record<string, IndexedPost['facets']> = {}
+  for (const post of insertedPosts) {
+    const record = records.find((r) => r.uri.toString() === post.uri)
+    if (!record) continue
+
+    facets[post.uri] = (record.obj.facets || [])
+      .flatMap((facet) => facet.features)
+      .flatMap((feature) => {
+        if (isMention(feature)) {
+          return {
+            type: 'mention' as const,
+            value: feature.did,
+          }
+        }
+        if (isLink(feature)) {
+          return {
+            type: 'link' as const,
+            value: feature.uri,
+          }
+        }
+        return []
+      })
+  }
+
+  const embeds: Record<
+    string,
+    (PostEmbedImage[] | PostEmbedExternal | PostEmbedRecord)[]
+  > = {}
+  const embedInserts: {
+    post_embed_image?: InsertObject<DatabaseSchemaType, 'post_embed_image'>[]
+    post_embed_external?: InsertObject<
+      DatabaseSchemaType,
+      'post_embed_external'
+    >[]
+    post_embed_record?: InsertObject<DatabaseSchemaType, 'post_embed_record'>[]
+    quote?: InsertObject<DatabaseSchemaType, 'quote'>[]
+    post_agg?: InsertObject<DatabaseSchemaType, 'post_agg'>[]
+    post_updates_violatesEmbeddingRules?: {
+      uri: string
+      violatesEmbeddingRules: boolean
+    }[]
+  } = {}
+  for (const post of insertedPosts) {
+    const postRecord = records.find((r) => r.uri.toString() === post.uri)
+    if (!postRecord) continue
+    const obj = postRecord.obj
+
+    embeds[post.uri] = []
+    const postEmbeds = separateEmbeds(obj.embed)
+    for (const postEmbed of postEmbeds) {
+      if (isEmbedImage(postEmbed)) {
+        const { images } = postEmbed
+        const imagesEmbed = images.map((img, i) => ({
+          postUri: post.uri,
+          position: i,
+          imageCid: img.image.ref.toString(),
+          alt: img.alt,
+        }))
+        embedInserts.post_embed_image ??= []
+        embedInserts.post_embed_image.push(...imagesEmbed)
+        embeds[post.uri].push(imagesEmbed)
+      } else if (isEmbedExternal(postEmbed)) {
+        const { external } = postEmbed
+        const externalEmbed = {
+          postUri: post.uri,
+          uri: external.uri,
+          title: external.title,
+          description: external.description,
+          thumbCid: external.thumb?.ref.toString(),
+        }
+        embedInserts.post_embed_external ??= []
+        embedInserts.post_embed_external.push(externalEmbed)
+        embeds[post.uri].push(externalEmbed)
+      } else if (isEmbedRecord(postEmbed)) {
+        const { record } = postEmbed
+        const embedUri = new AtUri(record.uri)
+        const recordEmbed = {
+          postUri: post.uri,
+          embedUri: record.uri,
+          embedCid: record.cid,
+        }
+        embedInserts.post_embed_record ??= []
+        embedInserts.post_embed_record.push(recordEmbed)
+        embeds[post.uri].push(recordEmbed)
+
+        if (embedUri.collection === lex.ids.AppBskyFeedPost) {
+          const quote = {
+            uri: post.uri,
+            cid: post.cid,
+            subject: record.uri,
+            subjectCid: record.cid,
+            createdAt: normalizeDatetimeAlways(post.createdAt),
+            indexedAt: post.indexedAt,
+          }
+          embedInserts.quote ??= []
+          embedInserts.quote.push(quote)
+
+          embedInserts.post_agg ??= []
+          embedInserts.post_agg.push({
+            uri: record.uri,
+            quoteCount: db
+              .selectFrom('quote')
+              .where('quote.subjectCid', '=', record.cid.toString())
+              .select(countAll.as('count')),
+          })
+
+          const { violatesEmbeddingRules } = await validatePostEmbed(
+            db,
+            embedUri.toString(),
+            post.uri,
+          )
+          Object.assign(post, { violatesEmbeddingRules })
+          if (violatesEmbeddingRules) {
+            embedInserts.post_updates_violatesEmbeddingRules ??= []
+            embedInserts.post_updates_violatesEmbeddingRules.push({
+              uri: post.uri,
+              violatesEmbeddingRules,
+            })
+          }
+        }
+      }
+    }
+  }
+
+  await Promise.all([
+    embedInserts.post_embed_image &&
+      db
+        .insertInto('post_embed_image')
+        .values(embedInserts.post_embed_image)
+        .execute(),
+    embedInserts.post_embed_external &&
+      db
+        .insertInto('post_embed_external')
+        .values(embedInserts.post_embed_external)
+        .execute(),
+    embedInserts.post_embed_record &&
+      db
+        .insertInto('post_embed_record')
+        .values(embedInserts.post_embed_record)
+        .execute(),
+    embedInserts.quote &&
+      db
+        .insertInto('quote')
+        .values(embedInserts.quote)
+        .onConflict((oc) => oc.doNothing())
+        .execute(),
+    embedInserts.post_agg &&
+      db
+        .insertInto('post_agg')
+        .values(embedInserts.post_agg)
+        .onConflict((oc) =>
+          oc
+            .column('uri')
+            .doUpdateSet({ quoteCount: excluded(db, 'quoteCount') }),
+        )
+        .execute(),
+    ...(embedInserts.post_updates_violatesEmbeddingRules
+      ? embedInserts.post_updates_violatesEmbeddingRules.map(
+          ({ uri, violatesEmbeddingRules }) =>
+            db
+              .updateTable('post')
+              .where('uri', '=', uri)
+              .set({ violatesEmbeddingRules })
+              .executeTakeFirst(),
+        )
+      : []),
+  ])
+
+  return Promise.all(
+    insertedPosts.map(async (post, index) => {
+      const threadgate = await getThreadgateRecord(db, post.uri)
+      const [ancestors, descendents] = await Promise.all([
+        getAncestorsAndSelfQb(db, {
+          uri: post.uri,
+          parentHeight: REPLY_NOTIF_DEPTH,
+        })
+          .selectFrom('ancestor')
+          .selectAll()
+          .execute(),
+        getDescendentsQb(db, {
+          uri: post.uri,
+          depth: REPLY_NOTIF_DEPTH,
+        })
+          .selectFrom('descendent')
+          .innerJoin('post', 'post.uri', 'descendent.uri')
+          .selectAll('descendent')
+          .select(['cid', 'creator', 'sortAt'])
+          .execute(),
+      ])
+      return {
+        post,
+        facets: facets[post.uri],
+        embeds: embeds[post.uri],
+        ancestors,
+        descendents,
+        threadgate,
+      }
+    }),
+  )
+}
+
 const findDuplicate = async (): Promise<AtUri | null> => {
   return null
 }
@@ -504,6 +802,48 @@ const updateAggregates = async (db: DatabaseSchema, postIdx: IndexedPost) => {
   await Promise.all([replyCountQb?.execute(), postsCountQb.execute()])
 }
 
+const updateAggregatesBulk = async (
+  db: DatabaseSchema,
+  posts: IndexedPost[],
+) => {
+  const replyCountQbs = db
+    .insertInto('post_agg')
+    .values(
+      posts
+        .filter((post) => !!post.post.replyParent)
+        .map((post) => ({
+          uri: post.post.replyParent!,
+          replyCount: db
+            .selectFrom('post')
+            .where('post.replyParent', '=', post.post.replyParent)
+            .where((qb) =>
+              qb
+                .where('post.violatesThreadGate', 'is', null)
+                .orWhere('post.violatesThreadGate', '=', false),
+            )
+            .select(countAll.as('count')),
+        })),
+    )
+    .onConflict((oc) =>
+      oc.column('uri').doUpdateSet({ replyCount: excluded(db, 'replyCount') }),
+    )
+  const postsCountQbs = db
+    .insertInto('profile_agg')
+    .values(
+      posts.map((post) => ({
+        did: post.post.creator,
+        postsCount: db
+          .selectFrom('post')
+          .where('post.creator', '=', post.post.creator)
+          .select(countAll.as('count')),
+      })),
+    )
+    .onConflict((oc) =>
+      oc.column('did').doUpdateSet({ postsCount: excluded(db, 'postsCount') }),
+    )
+  await Promise.all([replyCountQbs.execute(), postsCountQbs.execute()])
+}
+
 export type PluginType = RecordProcessor<PostRecord, IndexedPost>
 
 export const makePlugin = (
@@ -513,11 +853,13 @@ export const makePlugin = (
   return new RecordProcessor(db, background, {
     lexId,
     insertFn,
+    insertBulkFn,
     findDuplicate,
     deleteFn,
     notifsForInsert,
     notifsForDelete,
     updateAggregates,
+    updateAggregatesBulk,
   })
 }
 
