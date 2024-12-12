@@ -123,38 +123,40 @@ export class RecordProcessor<T, S> {
   async insertBulkRecords(
     records: Array<{
       uri: AtUri
-      cid: string
+      cid: CID
       obj: unknown
       timestamp: string
     }>,
     opts?: { disableNotifs?: boolean },
   ) {
-    records.forEach(({ obj }) => this.assertValidRecord(obj))
+    const formattedRecords = records.map(({ uri, cid, obj, timestamp }) => {
+      this.assertValidRecord(obj)
+      return {
+        uri: uri.toString(),
+        cid: cid.toString(),
+        did: uri.host,
+        json: stringifyLex(obj),
+        indexedAt: timestamp,
+        obj,
+      }
+    })
     await this.db
       .insertInto('record')
-      .values(
-        records.map(({ uri, cid, obj, timestamp }) => ({
-          uri: uri.toString(),
-          cid: cid.toString(),
-          did: uri.host,
-          json: stringifyLex(obj),
-          indexedAt: timestamp,
-        })),
-      )
+      .values(formattedRecords.map(({ obj: _, ...record }) => record))
       .onConflict((oc) => oc.doNothing())
       .execute()
 
-    const insertedPosts = await this.params.insertBulkFn(
+    const insertedRecords = await this.params.insertBulkFn(
       this.db,
       records as any, // `records.obj` is expected to be T but is unknown; we know it's T due to the assertValidRecord call above
     )
-    this.aggregateOnCommitBulk(insertedPosts)
+    this.aggregateOnCommitBulk(insertedRecords)
 
-    for (const inserted of insertedPosts) {
-      const record = records.find(
+    for (const inserted of insertedRecords) {
+      const record = formattedRecords.find(
         // We don't know for sure that `inserted` has a uri, but as far as I can tell every existing plugin does
         // except for chat-declaration.ts, which doesn't require notifs anyways
-        (r) => r.uri.toString() === (inserted as any)?.uri,
+        (r) => r.uri === (inserted as any)?.uri,
       )
       if (!record) continue
 
@@ -165,16 +167,16 @@ export class RecordProcessor<T, S> {
       const dupe = await this.params.findDuplicate(
         this.db,
         record.uri,
-        record.obj as T, // see previous comment on `records as any` assertion
+        record.obj,
       )
       if (dupe) {
         await this.db
           .updateTable('duplicate_record')
-          .where('uri', '=', record.uri.toString())
+          .where('uri', '=', record.uri)
           .set({
             cid: record.cid,
             duplicateOf: dupe.toString(),
-            indexedAt: record.timestamp,
+            indexedAt: record.indexedAt,
           })
           .execute()
       }
