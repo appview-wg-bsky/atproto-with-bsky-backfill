@@ -109,6 +109,25 @@ export class IndexingService {
     })
   }
 
+  async indexRecordsBulk(
+    collection: string,
+    records: Array<{
+      uri: AtUri
+      cid: CID
+      obj: unknown
+      timestamp: string
+    }>,
+    opts?: { disableNotifs?: boolean; disableLabels?: boolean },
+  ) {
+    this.db.assertNotTransaction()
+    await this.db.transaction(async (txn) => {
+      const indexingTx = this.transact(txn)
+      const indexer = indexingTx.findIndexerForCollection(collection)
+      if (!indexer) return
+      await indexer.insertBulkRecords(records, opts)
+    })
+  }
+
   async deleteRecord(uri: AtUri, cascading = false) {
     this.db.assertNotTransaction()
     await this.db.transaction(async (txn) => {
