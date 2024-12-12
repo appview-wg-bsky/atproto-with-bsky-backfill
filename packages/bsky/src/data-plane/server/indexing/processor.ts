@@ -129,18 +129,32 @@ export class RecordProcessor<T, S> {
     }>,
     opts?: { disableNotifs?: boolean },
   ) {
-    const formattedRecords = records.map(({ uri, cid, obj, timestamp }) => {
-      this.assertValidRecord(obj)
-      return {
-        atUri: uri,
-        uri: uri.toString(),
-        cid: cid.toString(),
-        did: uri.host,
-        json: stringifyLex(obj),
-        indexedAt: timestamp,
-        obj,
+    const formattedRecords: Array<{
+      atUri: AtUri
+      uri: string
+      cid: string
+      did: string
+      json: string
+      indexedAt: string
+      obj: unknown
+    }> = []
+    for (const { uri, cid, obj, timestamp } of records) {
+      try {
+        this.assertValidRecord(obj)
+        formattedRecords.push({
+          atUri: uri,
+          uri: uri.toString(),
+          cid: cid.toString(),
+          did: uri.host,
+          json: stringifyLex(obj),
+          indexedAt: timestamp,
+          obj,
+        })
+      } catch (e) {
+        console.error(e)
       }
-    })
+    }
+
     await this.db
       .insertInto('record')
       .values(
