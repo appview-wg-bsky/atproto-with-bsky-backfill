@@ -184,7 +184,7 @@ export class RecordProcessor<T, S> {
       const dupe = await this.params.findDuplicate(
         this.db,
         record.atUri,
-        record.obj,
+        record.obj as T, // we know it's T due to the assertValidRecord call above
       )
       if (dupe) {
         await this.db

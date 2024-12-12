@@ -1,12 +1,12 @@
 import { Selectable } from 'kysely'
 import { CID } from 'multiformats/cid'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
-import * as lex from '../../../../lexicon/lexicons'
 import * as Like from '../../../../lexicon/types/app/bsky/feed/like'
-import { BackgroundQueue } from '../../background'
+import * as lex from '../../../../lexicon/lexicons'
+import RecordProcessor from '../processor'
+import { countAll, excluded, valuesAliased } from '../../db/util'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { countAll, excluded } from '../../db/util'
 import { RecordProcessor } from '../processor'
 
 const lexId = lex.ids.AppBskyFeedLike
@@ -136,20 +136,36 @@ const updateAggregatesBulk = async (
   db: DatabaseSchema,
   likes: IndexedLike[],
 ) => {
+  const origDb = db
   const likeCountQbs = db
-    .insertInto('post_agg')
-    .values(
-      likes.map((like) => ({
-        uri: like.subject,
-        likeCount: db
-          .selectFrom('like')
-          .where('like.subject', '=', like.subject)
-          .select(countAll.as('count')),
-      })),
+    .with('input_values', (db) =>
+      db
+        .selectFrom(
+          valuesAliased(
+            likes.map((l) => ({ uri: l.subject })),
+            't',
+          ),
+        )
+        .select('uri'),
     )
-    .onConflict((oc) =>
-      oc.column('uri').doUpdateSet({ likeCount: excluded(db, 'likeCount') }),
+    .with('insert_counts', (db) =>
+      db
+        .insertInto('post_agg')
+        .columns(['uri', 'likeCount'])
+        .expression(
+          db
+            .selectFrom('input_values as v')
+            .leftJoin('like', (join) => join.on('like.subject', '=', 'v.uri'))
+            .select(['v.uri', (eb) => eb.fn.count('like.uri').as('likeCount')])
+            .groupBy('v.uri'),
+        )
+        .onConflict((oc) =>
+          oc
+            .column('uri')
+            .doUpdateSet({ likeCount: excluded(origDb, 'likeCount') }),
+        ),
     )
+    .selectFrom('insert_counts')
   await likeCountQbs.execute()
 }
 
