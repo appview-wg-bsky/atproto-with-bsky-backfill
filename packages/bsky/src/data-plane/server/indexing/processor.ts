@@ -132,6 +132,7 @@ export class RecordProcessor<T, S> {
     const formattedRecords = records.map(({ uri, cid, obj, timestamp }) => {
       this.assertValidRecord(obj)
       return {
+        atUri: uri,
         uri: uri.toString(),
         cid: cid.toString(),
         did: uri.host,
@@ -142,7 +143,9 @@ export class RecordProcessor<T, S> {
     })
     await this.db
       .insertInto('record')
-      .values(formattedRecords.map(({ obj: _, ...record }) => record))
+      .values(
+        formattedRecords.map(({ atUri: _, obj: __, ...record }) => record),
+      )
       .onConflict((oc) => oc.doNothing())
       .execute()
 
@@ -166,7 +169,7 @@ export class RecordProcessor<T, S> {
 
       const dupe = await this.params.findDuplicate(
         this.db,
-        record.uri,
+        record.atUri,
         record.obj,
       )
       if (dupe) {

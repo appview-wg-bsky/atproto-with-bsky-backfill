@@ -452,7 +452,7 @@ const insertBulkFn = async (
           uri: external.uri,
           title: external.title,
           description: external.description,
-          thumbCid: external.thumb?.ref.toString(),
+          thumbCid: external.thumb?.ref.toString() ?? null,
         }
         embedInserts.post_embed_external ??= []
         embedInserts.post_embed_external.push(externalEmbed)

@@ -50,7 +50,7 @@ const insertBulkFn = async (
   }[],
 ): Promise<Array<IndexedList>> => {
   return db
-    .insertInto('profile')
+    .insertInto('list')
     .values(
       records.map(({ uri, cid, obj, timestamp }) => ({
         uri: uri.toString(),
