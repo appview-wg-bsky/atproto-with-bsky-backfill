@@ -45,6 +45,32 @@ const insertFn = async (
   return inserted || null
 }
 
+const insertBulkFn = async (
+  db: DatabaseSchema,
+  records: {
+    uri: AtUri
+    cid: CID
+    obj: Postgate.Record
+    timestamp: string
+  }[],
+): Promise<Array<IndexedGate>> => {
+  return db
+    .insertInto('post_gate')
+    .values(
+      records.map(({ uri, cid, obj, timestamp }) => ({
+        uri: uri.toString(),
+        cid: cid.toString(),
+        creator: uri.host,
+        postUri: obj.post,
+        createdAt: normalizeDatetimeAlways(obj.createdAt),
+        indexedAt: timestamp,
+      })),
+    )
+    .onConflict((oc) => oc.doNothing())
+    .returningAll()
+    .execute()
+}
+
 const findDuplicate = async (
   db: DatabaseSchema,
   _uri: AtUri,
@@ -94,6 +120,7 @@ export const makePlugin = (
   return new RecordProcessor(db, background, {
     lexId,
     insertFn,
+    insertBulkFn,
     findDuplicate,
     deleteFn,
     notifsForInsert,

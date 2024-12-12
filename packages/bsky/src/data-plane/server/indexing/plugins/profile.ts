@@ -38,6 +38,36 @@ const insertFn = async (
   return inserted || null
 }
 
+const insertBulkFn = async (
+  db: DatabaseSchema,
+  records: {
+    uri: AtUri
+    cid: CID
+    obj: Profile.Record
+    timestamp: string
+  }[],
+): Promise<Array<IndexedProfile>> => {
+  return db
+    .insertInto('profile')
+    .values(
+      records.map(({ uri, cid, obj, timestamp }) => ({
+        uri: uri.toString(),
+        cid: cid.toString(),
+        creator: uri.host,
+        displayName: obj.displayName,
+        description: obj.description,
+        avatarCid: obj.avatar?.ref.toString(),
+        bannerCid: obj.banner?.ref.toString(),
+        joinedViaStarterPackUri: obj.joinedViaStarterPack?.uri,
+        createdAt: obj.createdAt ?? new Date().toISOString(),
+        indexedAt: timestamp,
+      })),
+    )
+    .onConflict((oc) => oc.doNothing())
+    .returningAll()
+    .execute()
+}
+
 const findDuplicate = async (): Promise<AtUri | null> => {
   return null
 }
@@ -83,6 +113,7 @@ export const makePlugin = (
   return new RecordProcessor(db, background, {
     lexId,
     insertFn,
+    insertBulkFn,
     findDuplicate,
     deleteFn,
     notifsForInsert,

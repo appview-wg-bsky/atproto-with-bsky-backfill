@@ -34,6 +34,32 @@ const insertFn = async (
   return inserted || null
 }
 
+const insertBulkFn = async (
+  db: DatabaseSchema,
+  records: {
+    uri: AtUri
+    cid: CID
+    obj: ListBlock.Record
+    timestamp: string
+  }[],
+): Promise<Array<IndexedListBlock>> => {
+  return db
+    .insertInto('list_block')
+    .values(
+      records.map(({ uri, cid, obj, timestamp }) => ({
+        uri: uri.toString(),
+        cid: cid.toString(),
+        creator: uri.host,
+        subjectUri: obj.subject,
+        createdAt: normalizeDatetimeAlways(obj.createdAt),
+        indexedAt: timestamp,
+      })),
+    )
+    .onConflict((oc) => oc.doNothing())
+    .returningAll()
+    .execute()
+}
+
 const findDuplicate = async (
   db: DatabaseSchema,
   uri: AtUri,
@@ -77,6 +103,7 @@ export const makePlugin = (
   return new RecordProcessor(db, background, {
     lexId,
     insertFn,
+    insertBulkFn,
     findDuplicate,
     deleteFn,
     notifsForInsert,

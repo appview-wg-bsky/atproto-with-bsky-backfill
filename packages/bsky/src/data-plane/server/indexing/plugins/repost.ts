@@ -55,6 +55,53 @@ const insertFn = async (
   return inserted || null
 }
 
+const insertBulkFn = async (
+  db: DatabaseSchema,
+  records: {
+    uri: AtUri
+    cid: CID
+    obj: Repost.Record
+    timestamp: string
+  }[],
+): Promise<Array<IndexedRepost>> => {
+  const [inserted] = await Promise.all([
+    db
+      .insertInto('repost')
+      .values(
+        records.map(({ uri, cid, obj, timestamp }) => ({
+          uri: uri.toString(),
+          cid: cid.toString(),
+          creator: uri.host,
+          subject: obj.subject.uri,
+          subjectCid: obj.subject.cid,
+          createdAt: normalizeDatetimeAlways(obj.createdAt),
+          indexedAt: timestamp,
+        })),
+      )
+      .onConflict((oc) => oc.doNothing())
+      .returningAll()
+      .execute(),
+    db
+      .insertInto('feed_item')
+      .values(
+        records.map(({ uri, cid, obj, timestamp }) => ({
+          type: 'repost' as const,
+          uri: uri.toString(),
+          cid: cid.toString(),
+          postUri: obj.subject.uri,
+          originatorDid: uri.host,
+          sortAt:
+            timestamp < normalizeDatetimeAlways(obj.createdAt)
+              ? timestamp
+              : normalizeDatetimeAlways(obj.createdAt),
+        })),
+      )
+      .onConflict((oc) => oc.doNothing())
+      .execute(),
+  ])
+  return inserted || []
+}
+
 const findDuplicate = async (
   db: DatabaseSchema,
   uri: AtUri,
@@ -130,6 +177,29 @@ const updateAggregates = async (db: DatabaseSchema, repost: IndexedRepost) => {
   await repostCountQb.execute()
 }
 
+const updateAggregatesBulk = async (
+  db: DatabaseSchema,
+  reposts: IndexedRepost[],
+) => {
+  const repostCountQbs = db
+    .insertInto('post_agg')
+    .values(
+      reposts.map((repost) => ({
+        uri: repost.subject,
+        repostCount: db
+          .selectFrom('repost')
+          .where('repost.subject', '=', repost.subject)
+          .select(countAll.as('count')),
+      })),
+    )
+    .onConflict((oc) =>
+      oc
+        .column('uri')
+        .doUpdateSet({ repostCount: excluded(db, 'repostCount') }),
+    )
+  await repostCountQbs.execute()
+}
+
 export type PluginType = RecordProcessor<Repost.Record, IndexedRepost>
 
 export const makePlugin = (
@@ -139,11 +209,13 @@ export const makePlugin = (
   return new RecordProcessor(db, background, {
     lexId,
     insertFn,
+    insertBulkFn,
     findDuplicate,
     deleteFn,
     notifsForInsert,
     notifsForDelete,
     updateAggregates,
+    updateAggregatesBulk,
   })
 }
 

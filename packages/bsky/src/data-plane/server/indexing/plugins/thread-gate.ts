@@ -45,6 +45,56 @@ const insertFn = async (
   return inserted || null
 }
 
+const insertBulkFn = async (
+  db: DatabaseSchema,
+  records: {
+    uri: AtUri
+    cid: CID
+    obj: Threadgate.Record
+    timestamp: string
+  }[],
+): Promise<Array<IndexedGate>> => {
+  for (const record of records) {
+    const postUri = new AtUri(record.obj.post)
+    if (postUri.host !== record.uri.host || postUri.rkey !== record.uri.rkey) {
+      throw new InvalidRequestError(
+        'Creator and rkey of thread gate does not match its post',
+      )
+    }
+  }
+
+  return db
+    .with('insert_threadgate', (db) =>
+      db
+        .insertInto('thread_gate')
+        .values(
+          records.map(({ uri, cid, obj, timestamp }) => ({
+            uri: uri.toString(),
+            cid: cid.toString(),
+            creator: uri.host,
+            postUri: obj.post,
+            createdAt: normalizeDatetimeAlways(obj.createdAt),
+            indexedAt: timestamp,
+          })),
+        )
+        .onConflict((oc) => oc.doNothing())
+        .returningAll(),
+    )
+    .with('update_post', (db) =>
+      db
+        .updateTable('post')
+        .where(
+          'uri',
+          'in',
+          db.selectFrom('insert_threadgate').select('postUri'),
+        )
+        .set({ hasThreadGate: true }),
+    )
+    .selectFrom('insert_threadgate')
+    .selectAll()
+    .execute()
+}
+
 const findDuplicate = async (
   db: DatabaseSchema,
   _uri: AtUri,
@@ -94,6 +144,7 @@ export const makePlugin = (
   return new RecordProcessor(db, background, {
     lexId,
     insertFn,
+    insertBulkFn,
     findDuplicate,
     deleteFn,
     notifsForInsert,
