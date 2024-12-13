@@ -361,10 +361,11 @@ const insertBulkFn = async (
 
         if (invalidReplyRoot || violatesThreadGate) {
           Object.assign(insertedPost, { invalidReplyRoot, violatesThreadGate })
-          return [
-            insertedPost.uri,
-            { invalidReplyRoot, violatesThreadGate },
-          ] as const
+          return {
+            uri: insertedPost.uri,
+            invalidReplyRoot,
+            violatesThreadGate,
+          }
         }
       }
     }),
@@ -374,13 +375,14 @@ const insertBulkFn = async (
     UPDATE post
     SET invalidReplyRoot = p.invalidReplyRoot,
         violatesThreadGate = p.violatesThreadGate
-    FROM (VALUES ${invalidReplyUpdates
-      .filter((u) => !!u)
-      .map(
-        ([uri, update]) =>
-          `(${uri}, ${update.invalidReplyRoot}, ${update.violatesThreadGate})`,
-      )
-      .join(', ')}) p(uri, invalidReplyRoot, violatesThreadGate)
+    FROM (VALUES ${sql.join(
+      invalidReplyUpdates
+        .filter((u) => !!u)
+        .map(
+          ({ uri, invalidReplyRoot, violatesThreadGate }) =>
+            `(${sql.join([uri, sql.literal(invalidReplyRoot), sql.literal(violatesThreadGate)])})`,
+        ),
+    )}) p(uri, invalidReplyRoot, violatesThreadGate)
     WHERE post.uri = p.uri;
   `.execute(db)
 
