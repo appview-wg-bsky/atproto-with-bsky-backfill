@@ -1,8 +1,8 @@
-import { Selectable } from 'kysely'
-import { CID } from 'multiformats/cid'
+import { Selectable, sql } from 'kysely'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
-import * as lex from '../../../../lexicon/lexicons'
+import { CID } from 'multiformats/cid'
 import * as Follow from '../../../../lexicon/types/app/bsky/graph/follow'
+import * as lex from '../../../../lexicon/lexicons'
 import { BackgroundQueue } from '../../background'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
@@ -145,39 +145,38 @@ const updateAggregatesBulk = async (
   db: DatabaseSchema,
   follows: IndexedFollow[],
 ) => {
-  const followersCountQbs = db
-    .insertInto('profile_agg')
-    .values(
-      follows.map((follow) => ({
-        did: follow.subjectDid,
-        followersCount: db
-          .selectFrom('follow')
-          .where('follow.subjectDid', '=', follow.subjectDid)
-          .select(countAll.as('count')),
-      })),
+  const followersCountQbs = sql`
+    WITH input_values (did) AS (
+      VALUES(${sql.join(follows.map((f) => f.subjectDid))})
     )
-    .onConflict((oc) =>
-      oc.column('did').doUpdateSet({
-        followersCount: excluded(db, 'followersCount'),
-      }),
+    INSERT INTO profile_agg ("did", "followersCount")
+    SELECT
+      v.did,
+      count(follow.subjectDid) AS followersCount
+    FROM
+      input_values AS v
+      LEFT JOIN follow ON follow.subjectDid = v.did
+    GROUP BY v.did
+    ON CONFLICT (did) DO UPDATE SET "followersCount" = excluded."followersCount"
+  `
+  const followsCountQbs = sql`
+    WITH input_values (did) AS (
+      VALUES(${sql.join(follows.map((f) => f.creator))})
     )
-  const followsCountQbs = db
-    .insertInto('profile_agg')
-    .values(
-      follows.map((follow) => ({
-        did: follow.creator,
-        followsCount: db
-          .selectFrom('follow')
-          .where('follow.creator', '=', follow.creator)
-          .select(countAll.as('count')),
-      })),
-    )
-    .onConflict((oc) =>
-      oc
-        .column('did')
-        .doUpdateSet({ followsCount: excluded(db, 'followsCount') }),
-    )
-  await Promise.all([followersCountQbs.execute(), followsCountQbs.execute()])
+    INSERT INTO profile_agg ("did", "followsCount")
+    SELECT
+      v.did,
+      count(follow.creator) AS followsCount
+    FROM
+      input_values AS v
+      LEFT JOIN follow ON follow.creator = v.did
+    GROUP BY v.did
+    ON CONFLICT (did) DO UPDATE SET "followsCount" = excluded."followsCount"
+  `
+  await Promise.all([
+    followersCountQbs.execute(db),
+    followsCountQbs.execute(db),
+  ])
 }
 
 export type PluginType = RecordProcessor<Follow.Record, IndexedFollow>

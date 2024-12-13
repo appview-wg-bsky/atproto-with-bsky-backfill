@@ -1,4 +1,4 @@
-import { Selectable } from 'kysely'
+import { Selectable, sql } from 'kysely'
 import { CID } from 'multiformats/cid'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import * as lex from '../../../../lexicon/lexicons'
@@ -181,23 +181,21 @@ const updateAggregatesBulk = async (
   db: DatabaseSchema,
   reposts: IndexedRepost[],
 ) => {
-  const repostCountQbs = db
-    .insertInto('post_agg')
-    .values(
-      reposts.map((repost) => ({
-        uri: repost.subject,
-        repostCount: db
-          .selectFrom('repost')
-          .where('repost.subject', '=', repost.subject)
-          .select(countAll.as('count')),
-      })),
+  const repostCountQbs = sql`
+    WITH input_values (uri) AS (
+      VALUES(${sql.join(reposts.map((r) => r.subject))})
     )
-    .onConflict((oc) =>
-      oc
-        .column('uri')
-        .doUpdateSet({ repostCount: excluded(db, 'repostCount') }),
-    )
-  await repostCountQbs.execute()
+    INSERT INTO post_agg ("uri", "repostCount")
+    SELECT
+      v.uri,
+      count(repost.uri) AS repostCount
+    FROM
+      input_values AS v
+      LEFT JOIN repost ON repost.subject = v.uri
+    GROUP BY v.uri
+    ON CONFLICT (uri) DO UPDATE SET "repostCount" = excluded."repostCount"
+  `
+  await repostCountQbs.execute(db)
 }
 
 export type PluginType = RecordProcessor<Repost.Record, IndexedRepost>

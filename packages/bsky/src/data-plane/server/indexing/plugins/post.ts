@@ -806,42 +806,37 @@ const updateAggregatesBulk = async (
   db: DatabaseSchema,
   posts: IndexedPost[],
 ) => {
-  const replyCountQbs = db
-    .insertInto('post_agg')
-    .values(
-      posts
-        .filter((post) => !!post.post.replyParent)
-        .map((post) => ({
-          uri: post.post.replyParent!,
-          replyCount: db
-            .selectFrom('post')
-            .where('post.replyParent', '=', post.post.replyParent)
-            .where((qb) =>
-              qb
-                .where('post.violatesThreadGate', 'is', null)
-                .orWhere('post.violatesThreadGate', '=', false),
-            )
-            .select(countAll.as('count')),
-        })),
+  const replyCountQbs = sql`
+    WITH input_values (uri) AS (
+        VALUES(${sql.join(posts.map((p) => p.post.replyParent))})
     )
-    .onConflict((oc) =>
-      oc.column('uri').doUpdateSet({ replyCount: excluded(db, 'replyCount') }),
+    INSERT INTO post_agg ("uri", "replyCount")
+    SELECT
+      v.uri,
+      count(post."replyParent") AS replyCount
+    FROM
+      input_values AS v
+      LEFT JOIN post ON post."replyParent" = v.uri
+        AND (post."violatesThreadGate" IS NULL OR post."violatesThreadGate" = false)
+    GROUP BY v.uri
+    ON CONFLICT (uri) DO UPDATE SET "replyCount" = excluded."replyCount"
+  `
+  const postsCountQbs = sql`
+    WITH input_values (did) AS (
+        VALUES(${sql.join(posts.map((p) => p.post.creator))})
     )
-  const postsCountQbs = db
-    .insertInto('profile_agg')
-    .values(
-      posts.map((post) => ({
-        did: post.post.creator,
-        postsCount: db
-          .selectFrom('post')
-          .where('post.creator', '=', post.post.creator)
-          .select(countAll.as('count')),
-      })),
-    )
-    .onConflict((oc) =>
-      oc.column('did').doUpdateSet({ postsCount: excluded(db, 'postsCount') }),
-    )
-  await Promise.all([replyCountQbs.execute(), postsCountQbs.execute()])
+    INSERT INTO profile_agg ("did", "postsCount")
+    SELECT
+      v.did,
+      count(post.creator) AS postsCount
+    FROM
+      input_values AS v
+      LEFT JOIN post ON post.creator = v.did
+    GROUP BY v.did
+    ON CONFLICT (did) DO UPDATE SET "postsCount" = excluded."postsCount"
+  `
+
+  await Promise.all([replyCountQbs.execute(db), postsCountQbs.execute(db)])
 }
 
 export type PluginType = RecordProcessor<PostRecord, IndexedPost>

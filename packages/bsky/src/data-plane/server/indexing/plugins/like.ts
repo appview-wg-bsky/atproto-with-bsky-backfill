@@ -1,13 +1,13 @@
-import { Selectable } from 'kysely'
-import { CID } from 'multiformats/cid'
+import { Selectable, sql } from 'kysely'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
+import { CID } from 'multiformats/cid'
 import * as Like from '../../../../lexicon/types/app/bsky/feed/like'
 import * as lex from '../../../../lexicon/lexicons'
 import RecordProcessor from '../processor'
-import { countAll, excluded, valuesAliased } from '../../db/util'
+import { countAll, excluded } from '../../db/util'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { RecordProcessor } from '../processor'
+import { BackgroundQueue } from '../../background'
 
 const lexId = lex.ids.AppBskyFeedLike
 type IndexedLike = Selectable<DatabaseSchemaType['like']>
@@ -136,37 +136,21 @@ const updateAggregatesBulk = async (
   db: DatabaseSchema,
   likes: IndexedLike[],
 ) => {
-  const origDb = db
-  const likeCountQbs = db
-    .with('input_values', (db) =>
-      db
-        .selectFrom(
-          valuesAliased(
-            likes.map((l) => ({ uri: l.subject })),
-            't',
-          ),
-        )
-        .select('uri'),
+  const likeCountQbs = sql`
+    WITH input_values (uri) AS (
+      VALUES(${sql.join(likes.map((l) => l.subject))})
     )
-    .with('insert_counts', (db) =>
-      db
-        .insertInto('post_agg')
-        .columns(['uri', 'likeCount'])
-        .expression(
-          db
-            .selectFrom('input_values as v')
-            .leftJoin('like', (join) => join.on('like.subject', '=', 'v.uri'))
-            .select(['v.uri', (eb) => eb.fn.count('like.uri').as('likeCount')])
-            .groupBy('v.uri'),
-        )
-        .onConflict((oc) =>
-          oc
-            .column('uri')
-            .doUpdateSet({ likeCount: excluded(origDb, 'likeCount') }),
-        ),
-    )
-    .selectFrom('insert_counts')
-  await likeCountQbs.execute()
+    INSERT INTO post_agg ("uri", "likeCount")
+    SELECT
+      v.uri,
+      count(like.uri) AS likeCount
+    FROM
+      input_values AS v
+      LEFT JOIN like ON like.subject = v.uri
+    GROUP BY v.uri
+    ON CONFLICT (uri) DO UPDATE SET "likeCount" = excluded."likeCount"
+  `
+  await likeCountQbs.execute(db)
 }
 
 export type PluginType = RecordProcessor<Like.Record, IndexedLike>
