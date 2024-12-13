@@ -479,6 +479,17 @@ const insertBulkFn = async (
           embedInserts.quote ??= []
           embedInserts.quote.push(quote)
 
+          // remove uri duplicates to avoid tripping ON CONFLICT multiple times
+          const existingQuoteCountInsert = embedInserts.post_agg?.findIndex(
+            (i) => i.uri === record.uri,
+          )
+          if (
+            existingQuoteCountInsert !== undefined &&
+            existingQuoteCountInsert > -1
+          ) {
+            embedInserts.post_agg?.splice(existingQuoteCountInsert, 1)
+          }
+
           embedInserts.post_agg ??= []
           embedInserts.post_agg.push({
             uri: record.uri,
