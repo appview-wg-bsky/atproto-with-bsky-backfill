@@ -151,7 +151,7 @@ export class RecordProcessor<T, S> {
           obj,
         })
       } catch (e) {
-        console.error(e)
+        console.error(`Record ${uri} failed assertion`, { cause: e })
       }
     }
 
