@@ -344,19 +344,13 @@ const insertBulkFn = async (
   const invalidReplyUpdates = await Promise.all(
     insertedPosts.map(async (insertedPost) => {
       if (insertedPost.replyParent || insertedPost.replyRoot) {
+        const record = records.find((r) => r.uri.href === insertedPost.uri)?.obj
+        if (!record?.reply) return
+
         const { invalidReplyRoot, violatesThreadGate } = await validateReply(
           db,
           insertedPost.creator,
-          {
-            parent: {
-              uri: insertedPost.replyParent ?? '',
-              cid: insertedPost.replyParentCid ?? '',
-            },
-            root: {
-              uri: insertedPost.replyRoot ?? '',
-              cid: insertedPost.replyRootCid ?? '',
-            },
-          },
+          record.reply,
         )
 
         if (invalidReplyRoot || violatesThreadGate) {
@@ -371,20 +365,22 @@ const insertBulkFn = async (
     }),
   )
 
-  await sql`
+  const invalidReplyUpdatesQb = sql`
     UPDATE post
-    SET invalidReplyRoot = p.invalidReplyRoot,
-        violatesThreadGate = p.violatesThreadGate
+    SET "invalidReplyRoot" = p."invalidReplyRoot",
+        "violatesThreadGate" = p."violatesThreadGate"
     FROM (VALUES ${sql.join(
       invalidReplyUpdates
         .filter((u) => !!u)
         .map(
-          ({ uri, invalidReplyRoot, violatesThreadGate }) =>
-            `(${sql.join([uri, sql.literal(invalidReplyRoot), sql.literal(violatesThreadGate)])})`,
+          (p) =>
+            sql`(${p.uri}, ${p.invalidReplyRoot ? sql`true` : sql`false`}, ${
+              p.violatesThreadGate ? sql`true` : sql`false`
+            })`,
         ),
-    )}) p(uri, invalidReplyRoot, violatesThreadGate)
-    WHERE post.uri = p.uri;
-  `.execute(db)
+    )}) as p(uri, "invalidReplyRoot", "violatesThreadGate")
+    WHERE post.uri = p.uri
+  `
 
   const facets: Record<string, IndexedPost['facets']> = {}
   for (const post of insertedPosts) {
@@ -510,7 +506,22 @@ const insertBulkFn = async (
     }
   }
 
+  const violatesEmbeddingRulesQb =
+    embedInserts.post_updates_violatesEmbeddingRules?.length &&
+    sql`
+    UPDATE post
+    SET "violatesEmbeddingRules" = v."violatesEmbeddingRules"
+    FROM (VALUES ${sql.join(
+      embedInserts.post_updates_violatesEmbeddingRules.map(
+        (v) =>
+          sql`(${v.uri}, ${v.violatesEmbeddingRules ? sql`true` : sql`false`})`,
+      ),
+    )}) as v(uri, "violatesEmbeddingRules")
+    WHERE post.uri = v.uri
+  `
+
   await Promise.all([
+    invalidReplyUpdatesQb.execute(db),
     embedInserts.post_embed_image &&
       db
         .insertInto('post_embed_image')
@@ -542,20 +553,11 @@ const insertBulkFn = async (
             .doUpdateSet({ quoteCount: excluded(db, 'quoteCount') }),
         )
         .execute(),
-    ...(embedInserts.post_updates_violatesEmbeddingRules
-      ? embedInserts.post_updates_violatesEmbeddingRules.map(
-          ({ uri, violatesEmbeddingRules }) =>
-            db
-              .updateTable('post')
-              .where('uri', '=', uri)
-              .set({ violatesEmbeddingRules })
-              .executeTakeFirst(),
-        )
-      : []),
+    violatesEmbeddingRulesQb && violatesEmbeddingRulesQb.execute(db),
   ])
 
   return Promise.all(
-    insertedPosts.map(async (post, index) => {
+    insertedPosts.map(async (post) => {
       const threadgate = await getThreadgateRecord(db, post.uri)
       const [ancestors, descendents] = await Promise.all([
         getAncestorsAndSelfQb(db, {
