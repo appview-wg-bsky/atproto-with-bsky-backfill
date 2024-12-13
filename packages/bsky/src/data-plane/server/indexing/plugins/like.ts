@@ -45,22 +45,20 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedLike>> => {
-  return db
-    .insertInto('like')
-    .values(
-      records.map(({ uri, cid, obj, timestamp }) => ({
-        uri: uri.toString(),
-        cid: cid.toString(),
-        creator: uri.host,
-        subject: obj.subject.uri,
-        subjectCid: obj.subject.cid,
-        createdAt: normalizeDatetimeAlways(obj.createdAt),
-        indexedAt: timestamp,
-      })),
-    )
-    .onConflict((oc) => oc.doNothing())
-    .returningAll()
-    .execute()
+  return sql<IndexedLike>`
+      INSERT INTO like ("uri", "cid", "creator", "subject", "subjectCid", "createdAt", "indexedAt")
+      VALUES ${sql.join(
+        records.map(
+          ({ uri, cid, obj, timestamp }) => sql`
+        (${sql.literal(uri.toString())}, ${sql.literal(cid.toString())}, ${sql.literal(uri.host)}, ${obj.subject.uri}, ${obj.subject.cid}, ${sql.literal(normalizeDatetimeAlways(obj.createdAt))}, ${sql.literal(timestamp)})
+      `,
+        ),
+      )}
+      RETURNING *
+      ON CONFLICT DO NOTHING
+  `
+    .execute(db)
+    .then((r) => r.rows)
 }
 
 const findDuplicate = async (
