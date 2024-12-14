@@ -1,4 +1,4 @@
-import { Selectable, sql } from 'kysely'
+import { RawBuilder, Selectable, sql } from 'kysely'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import { CID } from 'multiformats/cid'
 import * as Follow from '../../../../lexicon/types/app/bsky/graph/follow'
@@ -44,17 +44,38 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedFollow>> => {
+  // Transpose into an array per column to bypass the length limit on VALUES lists
+  // sql.literal() is unsafe, so we compromise by not calling it on user-provided values
+  const toInsert: [
+    uri: Array<RawBuilder<unknown>>,
+    cid: Array<RawBuilder<unknown>>,
+    creator: Array<RawBuilder<unknown>>,
+    subjectDid: Array<string>,
+    createdAt: Array<RawBuilder<unknown>>,
+    indexedAt: Array<RawBuilder<unknown>>,
+  ] = [[], [], [], [], [], []]
+  for (const { uri, cid, obj, timestamp } of records) {
+    toInsert[0].push(sql.literal(uri.toString()))
+    toInsert[1].push(sql.literal(cid.toString()))
+    toInsert[2].push(sql.literal(uri.host))
+    toInsert[3].push(obj.subject)
+    toInsert[4].push(sql.literal(normalizeDatetimeAlways(obj.createdAt)))
+    toInsert[5].push(sql.literal(timestamp))
+  }
   return db
     .insertInto('follow')
-    .values(
-      records.map(({ uri, cid, obj, timestamp }) => ({
-        uri: uri.toString(),
-        cid: cid.toString(),
-        creator: uri.host,
-        subjectDid: obj.subject,
-        createdAt: normalizeDatetimeAlways(obj.createdAt),
-        indexedAt: timestamp,
-      })),
+    .expression(
+      db
+        .selectFrom(
+          sql<IndexedFollow>`
+            unnest(${sql.join(
+              toInsert.map((arr) => sql`ARRAY[${sql.join(arr)}]`),
+            )})
+          `.as<'f'>(
+            sql`f("uri", "cid", "creator", "subjectDid", "createdAt", "indexedAt")`,
+          ),
+        )
+        .selectAll(),
     )
     .onConflict((oc) => oc.doNothing())
     .returningAll()
@@ -147,7 +168,7 @@ const updateAggregatesBulk = async (
 ) => {
   const followersCountQbs = sql`
     WITH input_values (did) AS (
-      VALUES(${sql.join(follows.map((f) => f.subjectDid))})
+      SELECT * FROM unnest(${sql`${[follows.map((f) => f.subjectDid)]}::text[]`})
     )
     INSERT INTO profile_agg ("did", "followersCount")
     SELECT
@@ -161,7 +182,7 @@ const updateAggregatesBulk = async (
   `
   const followsCountQbs = sql`
     WITH input_values (did) AS (
-      VALUES(${sql.join(follows.map((f) => f.creator))})
+      SELECT * FROM unnest(${sql`${[follows.map((f) => f.creator)]}::text[]`})
     )
     INSERT INTO profile_agg ("did", "followsCount")
     SELECT
