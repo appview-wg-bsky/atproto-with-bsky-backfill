@@ -829,7 +829,11 @@ const updateAggregatesBulk = async (
 ) => {
   const replyCountQbs = sql`
     WITH input_values (uri) AS (
-        VALUES(${sql.join(posts.map((p) => p.post.replyParent))})
+        SELECT * FROM UNNEST(${sql`${[
+          posts
+            .filter((p) => p.post.replyParent)
+            .map((p) => p.post.replyParent),
+        ]}::text[]`})
     )
     INSERT INTO post_agg ("uri", "replyCount")
     SELECT
@@ -844,7 +848,7 @@ const updateAggregatesBulk = async (
   `
   const postsCountQbs = sql`
     WITH input_values (did) AS (
-        VALUES(${sql.join(posts.map((p) => p.post.creator))})
+        SELECT * FROM UNNEST(${sql`${posts.map((p) => p.post.creator)}::text[]`})
     )
     INSERT INTO profile_agg ("did", "postsCount")
     SELECT
@@ -857,7 +861,17 @@ const updateAggregatesBulk = async (
     ON CONFLICT (did) DO UPDATE SET "postsCount" = excluded."postsCount"
   `
 
-  await Promise.all([replyCountQbs.execute(db), postsCountQbs.execute(db)])
+  await Promise.all([
+    replyCountQbs.execute(db).catch((e) => {
+      console.error('e on 11', e)
+      process.exit(1)
+    }),
+
+    postsCountQbs.execute(db).catch((e) => {
+      console.error('e on 12', e)
+      process.exit(1)
+    }),
+  ])
 }
 
 export type PluginType = RecordProcessor<PostRecord, IndexedPost>

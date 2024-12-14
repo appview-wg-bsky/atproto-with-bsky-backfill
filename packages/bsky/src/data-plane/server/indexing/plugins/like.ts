@@ -45,20 +45,26 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedLike>> => {
-  return sql<IndexedLike>`
-      INSERT INTO like ("uri", "cid", "creator", "subject", "subjectCid", "createdAt", "indexedAt")
-      VALUES ${sql.join(
-        records.map(
-          ({ uri, cid, obj, timestamp }) => sql`
-        (${sql.literal(uri.toString())}, ${sql.literal(cid.toString())}, ${sql.literal(uri.host)}, ${obj.subject.uri}, ${obj.subject.cid}, ${sql.literal(normalizeDatetimeAlways(obj.createdAt))}, ${sql.literal(timestamp)})
-      `,
-        ),
-      )}
-      RETURNING *
-      ON CONFLICT DO NOTHING
-  `
-    .execute(db)
-    .then((r) => r.rows)
+  return db
+    .insertInto('like')
+    .expression(
+      db
+        .selectFrom(
+          sql<IndexedLike>`(values ${sql.join(
+            records.map(
+              ({ uri, cid, obj, timestamp }) => sql`
+                (${sql.literal(uri.toString())}, ${sql.literal(cid.toString())}, ${sql.literal(uri.host)}, ${obj.subject.uri}, ${obj.subject.cid}, ${sql.literal(normalizeDatetimeAlways(obj.createdAt))}, ${sql.literal(timestamp)})
+            `,
+            ),
+          )})`.as<'l'>(
+            sql`l("uri", "cid", "creator", "subject", "subjectCid", "createdAt", "indexedAt")`,
+          ),
+        )
+        .selectAll(),
+    )
+    .onConflict((oc) => oc.doNothing())
+    .returningAll()
+    .execute()
 }
 
 const findDuplicate = async (
@@ -136,7 +142,7 @@ const updateAggregatesBulk = async (
 ) => {
   const likeCountQbs = sql`
     WITH input_values (uri) AS (
-      VALUES(${sql.join(likes.map((l) => l.subject))})
+      SELECT * FROM unnest(${sql`${[likes.map((l) => l.subject)]}::text[]`})
     )
     INSERT INTO post_agg ("uri", "likeCount")
     SELECT
