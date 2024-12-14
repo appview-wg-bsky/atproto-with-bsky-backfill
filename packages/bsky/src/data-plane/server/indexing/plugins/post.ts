@@ -371,45 +371,17 @@ const insertBulkFn = async (
         "violatesThreadGate" = p."violatesThreadGate"
     FROM (VALUES ${sql.join(
       invalidReplyUpdates
-        .filter((u) => !!u)
+        .filter((u) => !!u?.uri)
         .map(
-          (p) =>
-            sql`(${p.uri}, ${p.invalidReplyRoot ? sql`true` : sql`false`}, ${
-              p.violatesThreadGate ? sql`true` : sql`false`
+          (u) =>
+            sql`(${u!.uri}, ${u!.invalidReplyRoot ? sql`true` : sql`false`}, ${
+              u!.violatesThreadGate ? sql`true` : sql`false`
             })`,
         ),
     )}) as p(uri, "invalidReplyRoot", "violatesThreadGate")
     WHERE post.uri = p.uri
   `
 
-  const facets: Record<string, IndexedPost['facets']> = {}
-  for (const post of insertedPosts) {
-    const record = records.find((r) => r.uri.toString() === post.uri)
-    if (!record) continue
-
-    facets[post.uri] = (record.obj.facets || [])
-      .flatMap((facet) => facet.features)
-      .flatMap((feature) => {
-        if (isMention(feature)) {
-          return {
-            type: 'mention' as const,
-            value: feature.did,
-          }
-        }
-        if (isLink(feature)) {
-          return {
-            type: 'link' as const,
-            value: feature.uri,
-          }
-        }
-        return []
-      })
-  }
-
-  const embeds: Record<
-    string,
-    (PostEmbedImage[] | PostEmbedExternal | PostEmbedRecord)[]
-  > = {}
   const embedInserts: {
     post_embed_image?: InsertObject<DatabaseSchemaType, 'post_embed_image'>[]
     post_embed_external?: InsertObject<
@@ -418,7 +390,7 @@ const insertBulkFn = async (
     >[]
     post_embed_record?: InsertObject<DatabaseSchemaType, 'post_embed_record'>[]
     quote?: InsertObject<DatabaseSchemaType, 'quote'>[]
-    post_agg?: InsertObject<DatabaseSchemaType, 'post_agg'>[]
+    post_agg_quotedPosts?: Map<string, string>
     post_updates_violatesEmbeddingRules?: {
       uri: string
       violatesEmbeddingRules: boolean
@@ -429,7 +401,6 @@ const insertBulkFn = async (
     if (!postRecord) continue
     const obj = postRecord.obj
 
-    embeds[post.uri] = []
     const postEmbeds = separateEmbeds(obj.embed)
     for (const postEmbed of postEmbeds) {
       if (isEmbedImage(postEmbed)) {
@@ -448,7 +419,6 @@ const insertBulkFn = async (
           .filter((e) => !!e)
         embedInserts.post_embed_image ??= []
         embedInserts.post_embed_image.push(...imagesEmbed)
-        embeds[post.uri].push(imagesEmbed)
       } else if (isEmbedExternal(postEmbed)) {
         const { external } = postEmbed
         const externalEmbed = {
@@ -460,7 +430,6 @@ const insertBulkFn = async (
         }
         embedInserts.post_embed_external ??= []
         embedInserts.post_embed_external.push(externalEmbed)
-        embeds[post.uri].push(externalEmbed)
       } else if (isEmbedRecord(postEmbed)) {
         const { record } = postEmbed
         const embedUri = new AtUri(record.uri)
@@ -471,7 +440,6 @@ const insertBulkFn = async (
         }
         embedInserts.post_embed_record ??= []
         embedInserts.post_embed_record.push(recordEmbed)
-        embeds[post.uri].push(recordEmbed)
 
         if (embedUri.collection === lex.ids.AppBskyFeedPost) {
           const quote = {
@@ -485,25 +453,8 @@ const insertBulkFn = async (
           embedInserts.quote ??= []
           embedInserts.quote.push(quote)
 
-          // remove uri duplicates to avoid tripping ON CONFLICT multiple times
-          const existingQuoteCountInsert = embedInserts.post_agg?.findIndex(
-            (i) => i.uri === record.uri,
-          )
-          if (
-            existingQuoteCountInsert !== undefined &&
-            existingQuoteCountInsert > -1
-          ) {
-            embedInserts.post_agg?.splice(existingQuoteCountInsert, 1)
-          }
-
-          embedInserts.post_agg ??= []
-          embedInserts.post_agg.push({
-            uri: record.uri,
-            quoteCount: db
-              .selectFrom('quote')
-              .where('quote.subjectCid', '=', record.cid.toString())
-              .select(countAll.as('count')),
-          })
+          embedInserts.post_agg_quotedPosts ??= new Map()
+          embedInserts.post_agg_quotedPosts.set(record.cid, record.uri)
 
           const { violatesEmbeddingRules } = await validatePostEmbed(
             db,
@@ -560,10 +511,21 @@ const insertBulkFn = async (
         .values(embedInserts.quote)
         .onConflict((oc) => oc.doNothing())
         .execute(),
-    embedInserts.post_agg &&
+    embedInserts.post_agg_quotedPosts?.size &&
       db
         .insertInto('post_agg')
-        .values(embedInserts.post_agg)
+        .columns(['uri', 'quoteCount'])
+        .expression((eb) =>
+          eb
+            .selectFrom('quote')
+            .where(
+              'quote.subjectCid',
+              'in',
+              Array.from(embedInserts.post_agg_quotedPosts!.keys()),
+            )
+            .groupBy(['subjectCid', 'subject'])
+            .select(['subject as uri', countAll.as('quoteCount')]),
+        )
         .onConflict((oc) =>
           oc
             .column('uri')
@@ -573,37 +535,7 @@ const insertBulkFn = async (
     violatesEmbeddingRulesQb && violatesEmbeddingRulesQb.execute(db),
   ])
 
-  return Promise.all(
-    insertedPosts.map(async (post) => {
-      const threadgate = await getThreadgateRecord(db, post.uri)
-      const [ancestors, descendents] = await Promise.all([
-        getAncestorsAndSelfQb(db, {
-          uri: post.uri,
-          parentHeight: REPLY_NOTIF_DEPTH,
-        })
-          .selectFrom('ancestor')
-          .selectAll()
-          .execute(),
-        getDescendentsQb(db, {
-          uri: post.uri,
-          depth: REPLY_NOTIF_DEPTH,
-        })
-          .selectFrom('descendent')
-          .innerJoin('post', 'post.uri', 'descendent.uri')
-          .selectAll('descendent')
-          .select(['cid', 'creator', 'sortAt'])
-          .execute(),
-      ])
-      return {
-        post,
-        facets: facets[post.uri],
-        embeds: embeds[post.uri],
-        ancestors,
-        descendents,
-        threadgate,
-      }
-    }),
-  )
+  return insertedPosts.map((post) => ({ post }))
 }
 
 const findDuplicate = async (): Promise<AtUri | null> => {
