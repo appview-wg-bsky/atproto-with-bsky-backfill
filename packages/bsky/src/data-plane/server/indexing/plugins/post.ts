@@ -434,12 +434,18 @@ const insertBulkFn = async (
     for (const postEmbed of postEmbeds) {
       if (isEmbedImage(postEmbed)) {
         const { images } = postEmbed
-        const imagesEmbed = images.map((img, i) => ({
-          postUri: post.uri,
-          position: i,
-          imageCid: img.image.ref.toString(),
-          alt: img.alt,
-        }))
+        const imagesEmbed = images
+          .map((img, i) => {
+            const imageCid = img.image?.ref?.toString?.()
+            if (!imageCid) return
+            return {
+              postUri: post.uri,
+              position: i,
+              imageCid,
+              alt: img.alt,
+            }
+          })
+          .filter((e) => !!e)
         embedInserts.post_embed_image ??= []
         embedInserts.post_embed_image.push(...imagesEmbed)
         embeds[post.uri].push(imagesEmbed)
