@@ -1,13 +1,14 @@
 import { Insertable } from 'kysely'
 import { CID } from 'multiformats/cid'
+import { AtUri } from '@atproto/syntax'
 import { chunkArray } from '@atproto/common'
 import { jsonStringToLex, stringifyLex } from '@atproto/lexicon'
-import { AtUri } from '@atproto/syntax'
 import { lexicons } from '../../../lexicon/lexicons'
-import { BackgroundQueue } from '../background'
 import { Database } from '../db'
-import { DatabaseSchema } from '../db/database-schema'
+import DatabaseSchema from '../db/database-schema'
 import { Notification } from '../db/tables/notification'
+import { BackgroundQueue } from '../background'
+import { executeRaw, transpose } from '../util'
 
 // @NOTE re: insertions and deletions. Due to how record updates are handled,
 // (insertFn) should have the same effect as (insertFn -> deleteFn -> insertFn).
@@ -155,18 +156,36 @@ export class RecordProcessor<T, S> {
       }
     }
 
-    await this.db
-      .insertInto('record')
-      .values(
-        formattedRecords.map(({ atUri: _, obj: __, ...record }) => record),
-      )
-      .onConflict((oc) => oc.doNothing())
-      .execute()
-
-    const insertedRecords = await this.params.insertBulkFn(
-      this.db,
-      records as any, // `records.obj` is expected to be T but is unknown; we know it's T due to the assertValidRecord call above
+    const toInsertRecords = transpose(
+      formattedRecords,
+      ({ atUri: _, obj: __, ...record }) => [
+        record.uri,
+        record.cid,
+        record.did,
+        record.json,
+        record.indexedAt,
+      ],
     )
+
+    const [insertedRecords] = await Promise.all([
+      this.params.insertBulkFn(
+        this.db,
+        records as any, // `records.obj` is expected to be T but is unknown; we know it's T due to the assertValidRecord call above
+      ),
+      executeRaw(
+        this.db,
+        `
+      INSERT INTO record ("uri", "cid", "did", "json", "indexedAt")
+      SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
+      ON CONFLICT DO NOTHING
+      `,
+        toInsertRecords,
+      ).catch((e) => {
+        console.error('Failed to insert records', e)
+        console.error(toInsertRecords)
+        process.exit(1)
+      }),
+    ])
     this.aggregateOnCommitBulk(insertedRecords)
 
     for (const inserted of insertedRecords) {

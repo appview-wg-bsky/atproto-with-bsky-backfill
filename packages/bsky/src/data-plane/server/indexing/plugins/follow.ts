@@ -1,13 +1,14 @@
-import { RawBuilder, Selectable, sql } from 'kysely'
+import { Selectable, sql } from 'kysely'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import { CID } from 'multiformats/cid'
 import * as Follow from '../../../../lexicon/types/app/bsky/graph/follow'
 import * as lex from '../../../../lexicon/lexicons'
-import { BackgroundQueue } from '../../background'
+import RecordProcessor from '../processor'
 import { Database } from '../../db'
-import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
 import { countAll, excluded } from '../../db/util'
-import { RecordProcessor } from '../processor'
+import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
+import { BackgroundQueue } from '../../background'
+import { transpose } from '../../util'
 
 const lexId = lex.ids.AppBskyGraphFollow
 type IndexedFollow = Selectable<DatabaseSchemaType['follow']>
@@ -44,33 +45,22 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedFollow>> => {
-  // Transpose into an array per column to bypass the length limit on VALUES lists
-  // sql.literal() is unsafe, so we compromise by not calling it on user-provided values
-  const toInsert: [
-    uri: Array<RawBuilder<unknown>>,
-    cid: Array<RawBuilder<unknown>>,
-    creator: Array<RawBuilder<unknown>>,
-    subjectDid: Array<string>,
-    createdAt: Array<RawBuilder<unknown>>,
-    indexedAt: Array<RawBuilder<unknown>>,
-  ] = [[], [], [], [], [], []]
-  for (const { uri, cid, obj, timestamp } of records) {
-    toInsert[0].push(sql.literal(uri.toString()))
-    toInsert[1].push(sql.literal(cid.toString()))
-    toInsert[2].push(sql.literal(uri.host))
-    toInsert[3].push(obj.subject)
-    toInsert[4].push(sql.literal(normalizeDatetimeAlways(obj.createdAt)))
-    toInsert[5].push(sql.literal(timestamp))
-  }
+  const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
+    uri.toString(),
+    cid.toString(),
+    uri.host,
+    obj.subject,
+    normalizeDatetimeAlways(obj.createdAt),
+    timestamp,
+  ])
+
   return db
     .insertInto('follow')
     .expression(
       db
         .selectFrom(
           sql<IndexedFollow>`
-            unnest(${sql.join(
-              toInsert.map((arr) => sql`ARRAY[${sql.join(arr)}]`),
-            )})
+            unnest(${sql.join(toInsert, sql`::text[], `)}::text[])
           `.as<'f'>(
             sql`f("uri", "cid", "creator", "subjectDid", "createdAt", "indexedAt")`,
           ),

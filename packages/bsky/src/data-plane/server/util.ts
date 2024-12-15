@@ -1,4 +1,4 @@
-import { sql } from 'kysely'
+import { RawNode, sql } from 'kysely'
 import {
   Record as PostRecord,
   ReplyRef,
@@ -153,3 +153,37 @@ export const violatesThreadGate = async (
 
   return true
 }
+
+// Transpose an array of objects into an array of arrays, each corresponding to a column
+// meant to bypass the length limit on VALUES lists by instead using unnest() on the result of this function
+export const transpose = <T, const Out extends unknown[]>(
+  objs: T[],
+  transposeCol: (obj: T) => Out,
+): Out[] => {
+  const out: Out[] = []
+  for (const obj of objs) {
+    const transposed = transposeCol(obj)
+    for (const i in transposed) {
+      // @ts-expect-error
+      ;(out[i] ??= []).push(transposed[i])
+    }
+  }
+  return out
+}
+
+export const raw = (sql: string, parameters: unknown[]) =>
+  Object.freeze({
+    sql,
+    query: RawNode.createWithSql(sql),
+    parameters: Object.freeze(parameters),
+  })
+
+export const executeRaw = <RowType = unknown>(
+  db: DatabaseSchema,
+  sql: string,
+  parameters: unknown[],
+  queryId?: string,
+) =>
+  db.getExecutor().executeQuery<RowType>(raw(sql, parameters), {
+    queryId: queryId ?? Math.random().toString(36).substring(2),
+  })

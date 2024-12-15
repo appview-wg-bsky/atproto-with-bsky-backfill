@@ -32,9 +32,11 @@ import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
 import { Notification } from '../../db/tables/notification'
 import { countAll, excluded } from '../../db/util'
 import {
+  executeRaw,
   getAncestorsAndSelfQb,
   getDescendentsQb,
   invalidReplyRoot as checkInvalidReplyRoot,
+  transpose,
   violatesThreadGate as checkViolatesThreadGate,
 } from '../../util'
 import { RecordProcessor } from '../processor'
@@ -296,46 +298,58 @@ const insertBulkFn = async (
     timestamp: string
   }>,
 ): Promise<IndexedPost[]> => {
-  const posts = records.map(({ uri, cid, obj, timestamp }) => ({
-    uri: uri.toString(),
-    cid: cid.toString(),
-    creator: uri.host,
-    text: obj.text,
-    createdAt: normalizeDatetimeAlways(obj.createdAt),
-    replyRoot: obj.reply?.root?.uri || null,
-    replyRootCid: obj.reply?.root?.cid || null,
-    replyParent: obj.reply?.parent?.uri || null,
-    replyParentCid: obj.reply?.parent?.cid || null,
-    langs: obj.langs?.length
-      ? sql<string[]>`${JSON.stringify(obj.langs)}` // sidesteps kysely's array serialization, which is non-jsonb
-      : null,
-    tags: obj.tags?.length
-      ? sql<string[]>`${JSON.stringify(obj.tags)}` // sidesteps kysely's array serialization, which is non-jsonb
-      : null,
-    indexedAt: timestamp,
-  }))
+  const toInsertPost = transpose(records, ({ uri, cid, obj, timestamp }) => [
+    uri.toString(),
+    cid.toString(),
+    uri.host,
+    obj.text,
+    normalizeDatetimeAlways(obj.createdAt),
+    obj.reply?.root?.uri || null,
+    obj.reply?.root?.cid || null,
+    obj.reply?.parent?.uri || null,
+    obj.reply?.parent?.cid || null,
+    obj.langs?.length ? JSON.stringify(obj.langs) : null,
+    obj.tags?.length ? JSON.stringify(obj.tags) : null,
+    timestamp,
+  ])
 
-  const [insertedPosts] = await Promise.all([
-    db
-      .insertInto('post')
-      .values(posts)
-      .onConflict((oc) => oc.doNothing())
-      .returningAll()
-      .execute(),
-    db
-      .insertInto('feed_item')
-      .values(
-        posts.map((p) => ({
-          type: 'post' as const,
-          uri: p.uri,
-          cid: p.cid,
-          postUri: p.uri,
-          originatorDid: p.creator,
-          sortAt: p.indexedAt < p.createdAt ? p.indexedAt : p.createdAt,
-        })),
-      )
-      .onConflict((oc) => oc.doNothing())
-      .execute(),
+  const toInsertFeedItem = transpose(
+    records,
+    ({ uri, cid, obj, timestamp }) => [
+      'post',
+      uri.toString(),
+      cid.toString(),
+      uri.toString(),
+      uri.host,
+      timestamp < obj.createdAt ? timestamp : obj.createdAt,
+    ],
+  )
+
+  const [{ rows: insertedPosts }] = await Promise.all([
+    executeRaw<Post>(
+      db,
+      `
+          INSERT INTO post ("uri", "cid", "creator", "text", "createdAt", "replyRoot", "replyRootCid", "replyParent", "replyParentCid", "langs", "tags", "indexedAt")
+            SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::jsonb[], $11::jsonb[], $12::text[])
+          ON CONFLICT DO NOTHING
+          RETURNING *
+        `,
+      toInsertPost,
+    ).catch((e) => {
+      throw new Error('Failed to insert posts', { cause: e })
+    }),
+    executeRaw(
+      db,
+      `
+          INSERT INTO feed_item ("type", "uri", "cid", "postUri", "originatorDid", "sortAt")
+            SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+          ON CONFLICT DO NOTHING
+          RETURNING *
+        `,
+      toInsertFeedItem,
+    ).catch((e) => {
+      throw new Error('Failed to insert feed items', { cause: e })
+    }),
   ])
   if (!insertedPosts.length) {
     return []
@@ -365,22 +379,26 @@ const insertBulkFn = async (
     }),
   )
 
-  const invalidReplyUpdatesQb = sql`
-    UPDATE post
-    SET "invalidReplyRoot" = p."invalidReplyRoot",
-        "violatesThreadGate" = p."violatesThreadGate"
-    FROM (VALUES ${sql.join(
-      invalidReplyUpdates
-        .filter((u) => !!u?.uri)
-        .map(
-          (u) =>
-            sql`(${u!.uri}, ${u!.invalidReplyRoot ? sql`true` : sql`false`}, ${
-              u!.violatesThreadGate ? sql`true` : sql`false`
-            })`,
-        ),
-    )}) as p(uri, "invalidReplyRoot", "violatesThreadGate")
-    WHERE post.uri = p.uri
-  `
+  const toInsertInvalidReplyUpdates = transpose(
+    invalidReplyUpdates.filter((u) => !!u),
+    ({ uri, invalidReplyRoot, violatesThreadGate }) => [
+      uri,
+      invalidReplyRoot,
+      violatesThreadGate,
+    ],
+  )
+
+  const invalidReplyUpdatesQuery = executeRaw(
+    db,
+    `
+    UPDATE post SET "invalidReplyRoot" = v."invalidReplyRoot", "violatesThreadGate" = v."violatesThreadGate"
+    FROM (
+      SELECT * FROM unnest($1::text[], $2::boolean[], $3::boolean[]) AS t(uri, "invalidReplyRoot", "violatesThreadGate")
+    ) as v
+    WHERE post.uri = v.uri
+  `,
+    toInsertInvalidReplyUpdates,
+  )
 
   const embedInserts: {
     post_embed_image?: InsertObject<DatabaseSchemaType, 'post_embed_image'>[]
@@ -474,43 +492,59 @@ const insertBulkFn = async (
     }
   }
 
-  const violatesEmbeddingRulesQb =
+  const toInsertViolatesEmbeddingRules = transpose(
+    embedInserts.post_updates_violatesEmbeddingRules ?? [],
+    (v) => [v.uri, v.violatesEmbeddingRules],
+  )
+  const violatesEmbeddingRulesQuery =
     embedInserts.post_updates_violatesEmbeddingRules?.length &&
-    sql`
-    UPDATE post
-    SET "violatesEmbeddingRules" = v."violatesEmbeddingRules"
-    FROM (VALUES ${sql.join(
-      embedInserts.post_updates_violatesEmbeddingRules.map(
-        (v) =>
-          sql`(${v.uri}, ${v.violatesEmbeddingRules ? sql`true` : sql`false`})`,
-      ),
-    )}) as v(uri, "violatesEmbeddingRules")
-    WHERE post.uri = v.uri
-  `
+    executeRaw(
+      db,
+      `
+      UPDATE post SET "violatesEmbeddingRules" = v."violatesEmbeddingRules"
+      FROM (
+        SELECT * FROM unnest($1::text[], $2::boolean[]) AS t(uri, "violatesEmbeddingRules")
+      ) as v
+      WHERE post.uri = v.uri
+    `,
+      toInsertViolatesEmbeddingRules,
+    )
 
   await Promise.all([
-    invalidReplyUpdatesQb.execute(db),
+    invalidReplyUpdatesQuery,
     embedInserts.post_embed_image &&
       db
         .insertInto('post_embed_image')
         .values(embedInserts.post_embed_image)
-        .execute(),
+        .execute()
+        .catch((e) => {
+          throw new Error('Failed to insert post embed images', { cause: e })
+        }),
     embedInserts.post_embed_external &&
       db
         .insertInto('post_embed_external')
         .values(embedInserts.post_embed_external)
-        .execute(),
+        .execute()
+        .catch((e) => {
+          throw new Error('Failed to insert post embed externals', { cause: e })
+        }),
     embedInserts.post_embed_record &&
       db
         .insertInto('post_embed_record')
         .values(embedInserts.post_embed_record)
-        .execute(),
+        .execute()
+        .catch((e) => {
+          throw new Error('Failed to insert post embed records', { cause: e })
+        }),
     embedInserts.quote &&
       db
         .insertInto('quote')
         .values(embedInserts.quote)
         .onConflict((oc) => oc.doNothing())
-        .execute(),
+        .execute()
+        .catch((e) => {
+          throw new Error('Failed to insert quotes', { cause: e })
+        }),
     embedInserts.post_agg_quotedPosts?.size &&
       db
         .insertInto('post_agg')
@@ -531,8 +565,11 @@ const insertBulkFn = async (
             .column('uri')
             .doUpdateSet({ quoteCount: excluded(db, 'quoteCount') }),
         )
-        .execute(),
-    violatesEmbeddingRulesQb && violatesEmbeddingRulesQb.execute(db),
+        .execute()
+        .catch((e) => {
+          throw new Error('Failed to update aggregates', { cause: e })
+        }),
+    violatesEmbeddingRulesQuery,
   ])
 
   return insertedPosts.map((post) => ({ post }))
@@ -761,11 +798,11 @@ const updateAggregatesBulk = async (
 ) => {
   const replyCountQbs = sql`
     WITH input_values (uri) AS (
-        SELECT * FROM UNNEST(${sql`${[
+        SELECT * FROM unnest(${sql`${[
           posts
             .filter((p) => p.post.replyParent)
             .map((p) => p.post.replyParent),
-        ]}::text[]`})
+        ]}`}::text[])
     )
     INSERT INTO post_agg ("uri", "replyCount")
     SELECT
@@ -780,7 +817,7 @@ const updateAggregatesBulk = async (
   `
   const postsCountQbs = sql`
     WITH input_values (did) AS (
-        SELECT * FROM UNNEST(${sql`${posts.map((p) => p.post.creator)}::text[]`})
+        SELECT * FROM unnest(${sql`${posts.map((p) => p.post.creator)}::text[]`})
     )
     INSERT INTO profile_agg ("did", "postsCount")
     SELECT
@@ -795,13 +832,11 @@ const updateAggregatesBulk = async (
 
   await Promise.all([
     replyCountQbs.execute(db).catch((e) => {
-      console.error('e on 11', e)
-      process.exit(1)
+      throw new Error('Failed to update reply count aggregate', { cause: e })
     }),
 
     postsCountQbs.execute(db).catch((e) => {
-      console.error('e on 12', e)
-      process.exit(1)
+      throw new Error('Failed to update posts count aggregate', { cause: e })
     }),
   ])
 }
