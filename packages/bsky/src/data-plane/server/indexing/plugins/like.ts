@@ -8,7 +8,7 @@ import { countAll, excluded } from '../../db/util'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
 import { BackgroundQueue } from '../../background'
-import { transpose } from '../../util'
+import { executeRaw, transpose } from '../../util'
 
 const lexId = lex.ids.AppBskyFeedLike
 type IndexedLike = Selectable<DatabaseSchemaType['like']>
@@ -47,34 +47,28 @@ const insertBulkFn = async (
   }[],
 ): Promise<Array<IndexedLike>> => {
   const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
-    uri.toString(),
-    cid.toString(),
-    uri.host,
-    obj.subject.uri,
-    obj.subject.cid,
-    normalizeDatetimeAlways(obj.createdAt),
-    timestamp,
+    /* uri: */ uri.toString(),
+    /* cid: */ cid.toString(),
+    /* creator: */ uri.host,
+    /* subject: */ obj.subject.uri,
+    /* subjectCid: */ obj.subject.cid,
+    /* createdAt: */ normalizeDatetimeAlways(obj.createdAt),
+    /* indexedAt: */ timestamp,
   ])
 
-  return db
-    .insertInto('like')
-    .expression(
-      db
-        .selectFrom(
-          sql<IndexedLike>`
-            unnest(${sql.join(toInsert, sql`::text[], `)}::text[])
-          `.as<'l'>(
-            sql`l("uri", "cid", "creator", "subject", "subjectCid", "createdAt", "indexedAt")`,
-          ),
-        )
-        .selectAll(),
-    )
-    .onConflict((oc) => oc.doNothing())
-    .returningAll()
-    .execute()
-    .catch((e) => {
-      throw new Error('Failed to insert likes', { cause: e })
-    })
+  const { rows } = await executeRaw<IndexedLike>(
+    db,
+    `
+          INSERT INTO like ("uri", "cid", "creator", "subject", "subjectCid", "createdAt", "indexedAt")
+            SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+          ON CONFLICT DO NOTHING
+          RETURNING *
+        `,
+    toInsert,
+  ).catch((e) => {
+    throw new Error('Failed to insert likes', { cause: e })
+  })
+  return rows
 }
 
 const findDuplicate = async (

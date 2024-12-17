@@ -8,7 +8,6 @@ import { Database } from '../db'
 import DatabaseSchema from '../db/database-schema'
 import { Notification } from '../db/tables/notification'
 import { BackgroundQueue } from '../background'
-import { executeRaw, transpose } from '../util'
 
 // @NOTE re: insertions and deletions. Due to how record updates are handled,
 // (insertFn) should have the same effect as (insertFn -> deleteFn -> insertFn).
