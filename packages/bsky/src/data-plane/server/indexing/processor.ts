@@ -130,62 +130,18 @@ export class RecordProcessor<T, S> {
     }>,
     opts?: { disableNotifs?: boolean },
   ) {
-    const formattedRecords: Array<{
-      atUri: AtUri
-      uri: string
-      cid: string
-      did: string
-      json: string
-      indexedAt: string
-      obj: unknown
-    }> = []
-    for (const { uri, cid, obj, timestamp } of records) {
+    for (const { obj, uri } of records) {
       try {
         this.assertValidRecord(obj)
-        formattedRecords.push({
-          atUri: uri,
-          uri: uri.toString(),
-          cid: cid.toString(),
-          did: uri.host,
-          json: stringifyLex(obj),
-          indexedAt: timestamp,
-          obj,
-        })
       } catch (e) {
         console.error(`Record ${uri} failed assertion`, { cause: e })
       }
     }
 
-    const toInsertRecords = transpose(
-      formattedRecords,
-      ({ atUri: _, obj: __, ...record }) => [
-        record.uri,
-        record.cid,
-        record.did,
-        record.json,
-        record.indexedAt,
-      ],
+    const insertedRecords = await this.params.insertBulkFn(
+      this.db,
+      records as any, // `records.obj` is expected to be T but is unknown; we know it's T due to the assertValidRecord call above
     )
-
-    const [insertedRecords] = await Promise.all([
-      this.params.insertBulkFn(
-        this.db,
-        records as any, // `records.obj` is expected to be T but is unknown; we know it's T due to the assertValidRecord call above
-      ),
-      executeRaw(
-        this.db,
-        `
-      INSERT INTO record ("uri", "cid", "did", "json", "indexedAt")
-      SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
-      ON CONFLICT DO NOTHING
-      `,
-        toInsertRecords,
-      ).catch((e) => {
-        console.error('Failed to insert records', e)
-        console.error(toInsertRecords)
-        process.exit(1)
-      }),
-    ])
     this.aggregateOnCommitBulk(insertedRecords)
 
     for (const inserted of insertedRecords) {
