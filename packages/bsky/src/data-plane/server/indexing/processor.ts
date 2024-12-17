@@ -189,33 +189,26 @@ export class RecordProcessor<T, S> {
     this.aggregateOnCommitBulk(insertedRecords)
 
     for (const inserted of insertedRecords) {
-      const record = formattedRecords.find(
-        // We don't know for sure that `inserted` has a uri, but as far as I can tell every existing plugin does
-        // except for chat-declaration.ts, which doesn't require notifs anyways
-        (r) => r.uri === (inserted as any)?.uri,
-      )
-      if (!record) continue
-
       if (!opts?.disableNotifs) {
         await this.handleNotifs({ inserted })
       }
 
-      const dupe = await this.params.findDuplicate(
-        this.db,
-        record.atUri,
-        record.obj as T, // we know it's T due to the assertValidRecord call above
-      )
-      if (dupe) {
-        await this.db
-          .updateTable('duplicate_record')
-          .where('uri', '=', record.uri)
-          .set({
-            cid: record.cid,
-            duplicateOf: dupe.toString(),
-            indexedAt: record.indexedAt,
-          })
-          .execute()
-      }
+      // const dupe = await this.params.findDuplicate(
+      //   this.db,
+      //   record.atUri,
+      //   record.obj as T, // we know it's T due to the assertValidRecord call above
+      // )
+      // if (dupe) {
+      //   await this.db
+      //     .updateTable('duplicate_record')
+      //     .where('uri', '=', record.uri)
+      //     .set({
+      //       cid: record.cid,
+      //       duplicateOf: dupe.toString(),
+      //       indexedAt: record.indexedAt,
+      //     })
+      //     .execute()
+      // }
     }
   }
 
