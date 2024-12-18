@@ -1,12 +1,13 @@
 import { Selectable } from 'kysely'
-import { CID } from 'multiformats/cid'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
-import * as lex from '../../../../lexicon/lexicons'
+import { CID } from 'multiformats/cid'
 import * as Block from '../../../../lexicon/types/app/bsky/graph/block'
-import { BackgroundQueue } from '../../background'
+import * as lex from '../../../../lexicon/lexicons'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { RecordProcessor } from '../processor'
+import RecordProcessor from '../processor'
+import { BackgroundQueue } from '../../background'
+import { executeRaw, transpose } from '../../util'
 
 const lexId = lex.ids.AppBskyGraphBlock
 type IndexedBlock = Selectable<DatabaseSchemaType['actor_block']>
@@ -43,21 +44,27 @@ const insertBulkFn = async (
     timestamp: string
   }>,
 ): Promise<IndexedBlock[]> => {
-  return db
-    .insertInto('actor_block')
-    .values(
-      records.map(({ uri, cid, obj, timestamp }) => ({
-        uri: uri.toString(),
-        cid: cid.toString(),
-        creator: uri.host,
-        subjectDid: obj.subject,
-        createdAt: normalizeDatetimeAlways(obj.createdAt),
-        indexedAt: timestamp,
-      })),
-    )
-    .onConflict((oc) => oc.doNothing())
-    .returningAll()
-    .execute()
+  const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
+    /* uri: */ uri.toString(),
+    /* cid: */ cid.toString(),
+    /* creator: */ uri.host,
+    /* subjectDid: */ obj.subject,
+    /* createdAt: */ normalizeDatetimeAlways(obj.createdAt),
+    /* indexedAt: */ timestamp,
+  ])
+  return executeRaw<IndexedBlock>(
+    db,
+    `
+      INSERT INTO actor_block ("uri", "cid", "creator", "subjectDid", "createdAt", "indexedAt")
+      SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+      ON CONFLICT DO NOTHING
+    `,
+    toInsert,
+  )
+    .then((r) => r.rows)
+    .catch((e) => {
+      throw new Error(`Failed to insert blocks`, { cause: e })
+    })
 }
 
 const findDuplicate = async (

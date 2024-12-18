@@ -146,29 +146,42 @@ export class IndexingService {
     >,
     opts?: { disableNotifs?: boolean; disableLabels?: boolean },
   ) {
+    const allRecords = [...records.values()].flat()
+    if (!allRecords.length) return
+
     this.db.assertNotTransaction()
     await this.db.transaction(async (txn) => {
       await Promise.all([
         ...Array.from(records.entries()).map(async ([collection, records]) => {
+          if (!records.length) return
+
           const indexingTx = this.transact(txn)
           const indexer = indexingTx.findIndexerForCollection(collection)
           if (!indexer) {
             console.warn(`No indexer for collection ${collection}`)
             return
           }
-          return indexer.insertBulkRecords(records, opts)
+          console.time(`bulk insert ${collection} ${records.length}`)
+          return indexer
+            .insertBulkRecords(records, opts)
+            .catch((e) => {
+              throw new Error(
+                `Failed to bulk insert records for collection ${collection}`,
+                { cause: e },
+              )
+            })
+            .finally(() =>
+              console.timeEnd(`bulk insert ${collection} ${records.length}`),
+            )
         }),
         async () => {
-          const toInsertRecords = transpose(
-            [...records.values()].flat(),
-            (record) => [
-              /* uri: */ record.uri.toString(),
-              /* cid: */ record.cid.toString(),
-              /* did: */ record.uri.host,
-              /* json: */ stringifyLex(record.obj),
-              /* indexedAt: */ record.timestamp,
-            ],
-          )
+          const toInsertRecords = transpose(allRecords, (record) => [
+            /* uri: */ record.uri.toString(),
+            /* cid: */ record.cid.toString(),
+            /* did: */ record.uri.host,
+            /* json: */ stringifyLex(record.obj),
+            /* indexedAt: */ record.timestamp,
+          ])
 
           return executeRaw(
             this.db.db,

@@ -348,7 +348,7 @@ const insertBulkFn = async (
         `,
       toInsertFeedItem,
     ).catch((e) => {
-      throw new Error('Failed to insert feed items', { cause: e })
+      throw new Error('Failed to insert post feed items', { cause: e })
     }),
   ])
   if (!insertedPosts.length) {

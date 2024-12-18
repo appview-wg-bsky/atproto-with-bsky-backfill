@@ -1,12 +1,13 @@
-import { CID } from 'multiformats/cid'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import { InvalidRequestError } from '@atproto/xrpc-server'
-import * as lex from '../../../../lexicon/lexicons'
+import { CID } from 'multiformats/cid'
 import * as Threadgate from '../../../../lexicon/types/app/bsky/feed/threadgate'
-import { BackgroundQueue } from '../../background'
-import { Database } from '../../db'
+import * as lex from '../../../../lexicon/lexicons'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { RecordProcessor } from '../processor'
+import { Database } from '../../db'
+import RecordProcessor from '../processor'
+import { BackgroundQueue } from '../../background'
+import { executeRaw, transpose } from '../../util'
 
 const lexId = lex.ids.AppBskyFeedThreadgate
 type IndexedGate = DatabaseSchemaType['thread_gate']
@@ -63,36 +64,32 @@ const insertBulkFn = async (
     }
   }
 
-  return db
-    .with('insert_threadgate', (db) =>
-      db
-        .insertInto('thread_gate')
-        .values(
-          records.map(({ uri, cid, obj, timestamp }) => ({
-            uri: uri.toString(),
-            cid: cid.toString(),
-            creator: uri.host,
-            postUri: obj.post,
-            createdAt: normalizeDatetimeAlways(obj.createdAt),
-            indexedAt: timestamp,
-          })),
-        )
-        .onConflict((oc) => oc.doNothing())
-        .returningAll(),
-    )
-    .with('update_post', (db) =>
-      db
-        .updateTable('post')
-        .where(
-          'uri',
-          'in',
-          db.selectFrom('insert_threadgate').select('postUri'),
-        )
-        .set({ hasThreadGate: true }),
-    )
-    .selectFrom('insert_threadgate')
-    .selectAll()
-    .execute()
+  const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
+    /* uri: */ uri.toString(),
+    /* cid: */ cid.toString(),
+    /* creator: */ uri.host,
+    /* postUri: */ obj.post,
+    /* createdAt: */ normalizeDatetimeAlways(obj.createdAt),
+    /* indexedAt: */ timestamp,
+  ])
+
+  return executeRaw<IndexedGate>(
+    db,
+    `
+      WITH "insert_threadgate" AS (
+        INSERT INTO "thread_gate" ("uri", "cid", "creator", "postUri", "createdAt", "indexedAt")
+        SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+        ON CONFLICT DO NOTHING
+        RETURNING *
+      ),
+      "update_post" AS (
+        UPDATE "post" SET "hasThreadGate" = true
+        WHERE "post"."uri" in (SELECT "postUri" FROM "insert_threadgate")
+      )
+      SELECT * FROM "insert_threadgate"
+    `,
+    toInsert,
+  ).then((r) => r.rows)
 }
 
 const findDuplicate = async (

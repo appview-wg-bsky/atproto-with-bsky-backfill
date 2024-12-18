@@ -1,12 +1,13 @@
 import { Selectable } from 'kysely'
-import { CID } from 'multiformats/cid'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
-import * as lex from '../../../../lexicon/lexicons'
+import { CID } from 'multiformats/cid'
 import * as ListBlock from '../../../../lexicon/types/app/bsky/graph/listblock'
-import { BackgroundQueue } from '../../background'
+import * as lex from '../../../../lexicon/lexicons'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { RecordProcessor } from '../processor'
+import RecordProcessor from '../processor'
+import { BackgroundQueue } from '../../background'
+import { executeRaw, transpose } from '../../util'
 
 const lexId = lex.ids.AppBskyGraphListblock
 type IndexedListBlock = Selectable<DatabaseSchemaType['list_block']>
@@ -43,21 +44,27 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedListBlock>> => {
-  return db
-    .insertInto('list_block')
-    .values(
-      records.map(({ uri, cid, obj, timestamp }) => ({
-        uri: uri.toString(),
-        cid: cid.toString(),
-        creator: uri.host,
-        subjectUri: obj.subject,
-        createdAt: normalizeDatetimeAlways(obj.createdAt),
-        indexedAt: timestamp,
-      })),
-    )
-    .onConflict((oc) => oc.doNothing())
-    .returningAll()
-    .execute()
+  const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
+    /* uri: */ uri.toString(),
+    /* cid: */ cid.toString(),
+    /* creator: */ uri.host,
+    /* subjectUri: */ obj.subject,
+    /* createdAt: */ normalizeDatetimeAlways(obj.createdAt),
+    /* indexedAt: */ timestamp,
+  ])
+  return executeRaw<IndexedListBlock>(
+    db,
+    `
+      INSERT INTO list_block ("uri", "cid", "creator", "subjectUri", "createdAt", "indexedAt")
+      SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+      ON CONFLICT DO NOTHING
+    `,
+    toInsert,
+  )
+    .then((r) => r.rows)
+    .catch((e) => {
+      throw new Error(`Failed to insert list blocks`, { cause: e })
+    })
 }
 
 const findDuplicate = async (

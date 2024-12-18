@@ -58,12 +58,14 @@ const insertBulkFn = async (
     db,
     `
       INSERT INTO follow ("uri", "cid", "creator", "subjectDid", "createdAt", "indexedAt")
-      SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+      SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
       ON CONFLICT DO NOTHING
       RETURNING *
     `,
     toInsert,
-  )
+  ).catch((e) => {
+    throw new Error('Failed to insert follows', { cause: e })
+  })
   return rows
 }
 
@@ -158,10 +160,10 @@ const updateAggregatesBulk = async (
     INSERT INTO profile_agg ("did", "followersCount")
     SELECT
       v.did,
-      count(follow.subjectDid) AS followersCount
+      count(follow."subjectDid") AS "followersCount"
     FROM
       input_values AS v
-      LEFT JOIN follow ON follow.subjectDid = v.did
+      LEFT JOIN follow ON follow."subjectDid" = v.did
     GROUP BY v.did
     ON CONFLICT (did) DO UPDATE SET "followersCount" = excluded."followersCount"
   `
@@ -180,8 +182,12 @@ const updateAggregatesBulk = async (
     ON CONFLICT (did) DO UPDATE SET "followsCount" = excluded."followsCount"
   `
   await Promise.all([
-    followersCountQbs.execute(db),
-    followsCountQbs.execute(db),
+    followersCountQbs.execute(db).catch((e) => {
+      throw new Error('Failed to update follower aggregates', { cause: e })
+    }),
+    followsCountQbs.execute(db).catch((e) => {
+      throw new Error('Failed to update follow aggregates', { cause: e })
+    }),
   ])
 }
 

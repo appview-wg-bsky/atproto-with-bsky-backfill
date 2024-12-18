@@ -94,22 +94,26 @@ const insertBulkFn = async (
       db,
       `
           INSERT INTO repost ("uri", "cid", "creator", "subject", "subjectCid", "createdAt", "indexedAt")
-          SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+          SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
           ON CONFLICT DO NOTHING
           RETURNING *
         `,
       toInsertRepost,
-    ),
+    ).catch((e) => {
+      throw new Error('Failed to insert reposts', { cause: e })
+    }),
     executeRaw(
       db,
       `
           INSERT INTO feed_item ("type", "uri", "cid", "postUri", "originatorDid", "sortAt")
-          SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+          SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
           ON CONFLICT DO NOTHING
           RETURNING *
         `,
       toInsertFeedItem,
-    ),
+    ).catch((e) => {
+      throw new Error('Failed to insert repost feed items', { cause: e })
+    }),
   ])
   return inserted || []
 }
@@ -207,7 +211,9 @@ const updateAggregatesBulk = async (
     GROUP BY v.uri
     ON CONFLICT (uri) DO UPDATE SET "repostCount" = excluded."repostCount"
   `
-  await repostCountQbs.execute(db)
+  await repostCountQbs.execute(db).catch((e) => {
+    throw new Error('Failed to update repost aggregates', { cause: e })
+  })
 }
 
 export type PluginType = RecordProcessor<Repost.Record, IndexedRepost>

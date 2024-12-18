@@ -59,7 +59,7 @@ const insertBulkFn = async (
   const { rows } = await executeRaw<IndexedLike>(
     db,
     `
-          INSERT INTO like ("uri", "cid", "creator", "subject", "subjectCid", "createdAt", "indexedAt")
+          INSERT INTO "like" ("uri", "cid", "creator", "subject", "subjectCid", "createdAt", "indexedAt")
             SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
           ON CONFLICT DO NOTHING
           RETURNING *

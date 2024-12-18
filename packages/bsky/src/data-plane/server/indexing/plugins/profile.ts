@@ -1,11 +1,12 @@
-import { CID } from 'multiformats/cid'
 import { AtUri } from '@atproto/syntax'
-import * as lex from '../../../../lexicon/lexicons'
+import { CID } from 'multiformats/cid'
 import * as Profile from '../../../../lexicon/types/app/bsky/actor/profile'
-import { BackgroundQueue } from '../../background'
-import { Database } from '../../db'
+import * as lex from '../../../../lexicon/lexicons'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { RecordProcessor } from '../processor'
+import RecordProcessor from '../processor'
+import { Database } from '../../db'
+import { BackgroundQueue } from '../../background'
+import { executeRaw, transpose } from '../../util'
 
 const lexId = lex.ids.AppBskyActorProfile
 type IndexedProfile = DatabaseSchemaType['profile']
@@ -47,25 +48,31 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedProfile>> => {
-  return db
-    .insertInto('profile')
-    .values(
-      records.map(({ uri, cid, obj, timestamp }) => ({
-        uri: uri.toString(),
-        cid: cid.toString(),
-        creator: uri.host,
-        displayName: obj.displayName,
-        description: obj.description,
-        avatarCid: obj.avatar?.ref.toString(),
-        bannerCid: obj.banner?.ref.toString(),
-        joinedViaStarterPackUri: obj.joinedViaStarterPack?.uri,
-        createdAt: obj.createdAt ?? new Date().toISOString(),
-        indexedAt: timestamp,
-      })),
-    )
-    .onConflict((oc) => oc.doNothing())
-    .returningAll()
-    .execute()
+  const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
+    /* uri: */ uri.toString(),
+    /* cid: */ cid.toString(),
+    /* creator: */ uri.host,
+    /* displayName: */ obj.displayName,
+    /* description: */ obj.description,
+    /* avatarCid: */ obj.avatar?.ref.toString(),
+    /* bannerCid: */ obj.banner?.ref.toString(),
+    /* joinedViaStarterPackUri: */ obj.joinedViaStarterPack?.uri,
+    /* createdAt: */ obj.createdAt ?? new Date().toISOString(),
+    /* indexedAt: */ timestamp,
+  ])
+  return executeRaw<IndexedProfile>(
+    db,
+    `
+      INSERT INTO profile ("uri", "cid", "creator", "displayName", "description", "avatarCid", "bannerCid", "joinedViaStarterPackUri", "createdAt", "indexedAt")
+      SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[])
+      ON CONFLICT DO NOTHING
+    `,
+    toInsert,
+  )
+    .then((r) => r.rows)
+    .catch((e) => {
+      throw new Error(`Failed to insert profiles`, { cause: e })
+    })
 }
 
 const findDuplicate = async (): Promise<AtUri | null> => {
