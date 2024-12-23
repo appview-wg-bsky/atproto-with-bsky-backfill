@@ -22,7 +22,7 @@ const insertFn = async (
 }
 
 const insertBulkFn = async (
-  _db: DatabaseSchema,
+  _db: Database,
   _records: { uri: AtUri }[],
 ): Promise<Array<unknown | null>> => {
   return _records.map((r) => (r.uri.rkey === 'self' ? true : null))

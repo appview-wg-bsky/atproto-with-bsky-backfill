@@ -1,12 +1,13 @@
 import { Selectable } from 'kysely'
-import { CID } from 'multiformats/cid'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
-import * as lex from '../../../../lexicon/lexicons'
+import { CID } from 'multiformats/cid'
 import * as FeedGenerator from '../../../../lexicon/types/app/bsky/feed/generator'
-import { BackgroundQueue } from '../../background'
+import * as lex from '../../../../lexicon/lexicons'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { RecordProcessor } from '../processor'
+import RecordProcessor from '../processor'
+import { BackgroundQueue } from '../../background'
+import { copyIntoTable } from '../../util'
 
 const lexId = lex.ids.AppBskyFeedGenerator
 type IndexedFeedGenerator = Selectable<DatabaseSchemaType['feed_generator']>
@@ -40,36 +41,91 @@ const insertFn = async (
   return inserted || null
 }
 
+// const insertBulkFn = async (
+//   db: DatabaseSchema,
+//   records: {
+//     uri: AtUri
+//     cid: CID
+//     obj: FeedGenerator.Record
+//     timestamp: string
+//   }[],
+// ): Promise<Array<IndexedFeedGenerator>> => {
+//   return db
+//     .insertInto('feed_generator')
+//     .values(
+//       records.map(({ uri, cid, obj, timestamp }) => ({
+//         uri: uri.toString(),
+//         cid: cid.toString(),
+//         creator: uri.host,
+//         feedDid: obj.did,
+//         displayName: obj.displayName,
+//         description: obj.description,
+//         descriptionFacets: obj.descriptionFacets
+//           ? JSON.stringify(obj.descriptionFacets)
+//           : undefined,
+//         avatarCid: obj.avatar?.ref.toString(),
+//         createdAt: normalizeDatetimeAlways(obj.createdAt),
+//         indexedAt: timestamp,
+//       })),
+//     )
+//     .onConflict((oc) => oc.doNothing())
+//     .returningAll()
+//     .execute()
+// }
+
 const insertBulkFn = async (
-  db: DatabaseSchema,
+  db: Database,
   records: {
     uri: AtUri
     cid: CID
     obj: FeedGenerator.Record
     timestamp: string
   }[],
-): Promise<Array<IndexedFeedGenerator>> => {
-  return db
-    .insertInto('feed_generator')
-    .values(
-      records.map(({ uri, cid, obj, timestamp }) => ({
-        uri: uri.toString(),
-        cid: cid.toString(),
-        creator: uri.host,
-        feedDid: obj.did,
-        displayName: obj.displayName,
-        description: obj.description,
-        descriptionFacets: obj.descriptionFacets
-          ? JSON.stringify(obj.descriptionFacets)
-          : undefined,
-        avatarCid: obj.avatar?.ref.toString(),
-        createdAt: normalizeDatetimeAlways(obj.createdAt),
-        indexedAt: timestamp,
-      })),
+): Promise<IndexedFeedGenerator[]> => {
+  const client = await db.pool.connect()
+  try {
+    return copyIntoTable(
+      client,
+      'feed_generator',
+      [
+        'uri',
+        'cid',
+        'creator',
+        'feedDid',
+        'displayName',
+        'description',
+        'descriptionFacets',
+        'avatarCid',
+        'createdAt',
+        'indexedAt',
+      ],
+      records.map(({ uri, cid, obj, timestamp }) => {
+        const createdAt = normalizeDatetimeAlways(obj.createdAt)
+        const indexedAt = timestamp
+        const sortAt =
+          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+            ? createdAt
+            : indexedAt
+        return {
+          uri: uri.toString(),
+          cid: cid.toString(),
+          creator: uri.host,
+          feedDid: obj.did,
+          displayName: obj.displayName,
+          description: obj.description ?? null,
+          descriptionFacets: obj.descriptionFacets
+            ? JSON.stringify(obj.descriptionFacets)
+            : null,
+          avatarCid: obj.avatar?.ref.toString() ?? null,
+          createdAt,
+          indexedAt,
+          sortAt,
+        }
+      }),
     )
-    .onConflict((oc) => oc.doNothing())
-    .returningAll()
-    .execute()
+  } finally {
+    client.release()
+  }
 }
 
 const findDuplicate = async (): Promise<AtUri | null> => {

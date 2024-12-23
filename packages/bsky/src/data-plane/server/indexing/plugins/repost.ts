@@ -8,7 +8,7 @@ import { Database } from '../../db'
 import { countAll, excluded } from '../../db/util'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
 import { BackgroundQueue } from '../../background'
-import { executeRaw, transpose } from '../../util'
+import { copyIntoTable, executeRaw, transpose } from '../../util'
 
 const lexId = lex.ids.AppBskyFeedRepost
 type IndexedRepost = Selectable<DatabaseSchemaType['repost']>
@@ -56,8 +56,70 @@ const insertFn = async (
   return inserted || null
 }
 
+// const insertBulkFn = async (
+//   db: DatabaseSchema,
+//   records: {
+//     uri: AtUri
+//     cid: CID
+//     obj: Repost.Record
+//     timestamp: string
+//   }[],
+// ): Promise<Array<IndexedRepost>> => {
+//   const toInsertRepost = transpose(records, ({ uri, cid, obj, timestamp }) => [
+//     /* uri: */ uri.toString(),
+//     /* cid: */ cid.toString(),
+//     /* creator: */ uri.host,
+//     /* subject: */ obj.subject.uri,
+//     /* subjectCid: */ obj.subject.cid,
+//     /* createdAt: */ normalizeDatetimeAlways(obj.createdAt),
+//     /* indexedAt: */ timestamp,
+//   ])
+//
+//   const toInsertFeedItem = transpose(
+//     records,
+//     ({ uri, cid, obj, timestamp }) => [
+//       /* type: */ 'post',
+//       /* uri: */ uri.toString(),
+//       /* cid: */ cid.toString(),
+//       /* postUri: */ obj.subject.uri,
+//       /* originatorDid: */ uri.host,
+//       /* sortAt: */ timestamp < normalizeDatetimeAlways(obj.createdAt)
+//         ? timestamp
+//         : normalizeDatetimeAlways(obj.createdAt),
+//     ],
+//   )
+//
+//   const [{ rows: inserted }] = await Promise.all([
+//     executeRaw<IndexedRepost>(
+//       db,
+//       `
+//           INSERT INTO repost ("uri", "cid", "creator", "subject", "subjectCid", "createdAt", "indexedAt")
+//           SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+//           ON CONFLICT DO NOTHING
+//           RETURNING *
+//         `,
+//       toInsertRepost,
+//     ).catch((e) => {
+//       throw new Error('Failed to insert reposts', { cause: e })
+//     }),
+//     executeRaw(
+//       db,
+//       `
+//           INSERT INTO feed_item ("type", "uri", "cid", "postUri", "originatorDid", "sortAt")
+//           SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+//           ON CONFLICT DO NOTHING
+//           RETURNING *
+//         `,
+//       toInsertFeedItem,
+//     ).catch((e) => {
+//       throw new Error('Failed to insert repost feed items', { cause: e })
+//     }),
+//   ])
+//   return inserted || []
+// }
+
 const insertBulkFn = async (
-  db: DatabaseSchema,
+  db: Database,
   records: {
     uri: AtUri
     cid: CID
@@ -65,57 +127,66 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedRepost>> => {
-  const toInsertRepost = transpose(records, ({ uri, cid, obj, timestamp }) => [
-    /* uri: */ uri.toString(),
-    /* cid: */ cid.toString(),
-    /* creator: */ uri.host,
-    /* subject: */ obj.subject.uri,
-    /* subjectCid: */ obj.subject.cid,
-    /* createdAt: */ normalizeDatetimeAlways(obj.createdAt),
-    /* indexedAt: */ timestamp,
-  ])
-
-  const toInsertFeedItem = transpose(
-    records,
-    ({ uri, cid, obj, timestamp }) => [
-      /* type: */ 'post',
-      /* uri: */ uri.toString(),
-      /* cid: */ cid.toString(),
-      /* postUri: */ obj.subject.uri,
-      /* originatorDid: */ uri.host,
-      /* sortAt: */ timestamp < normalizeDatetimeAlways(obj.createdAt)
-        ? timestamp
-        : normalizeDatetimeAlways(obj.createdAt),
-    ],
-  )
-
-  const [{ rows: inserted }] = await Promise.all([
-    executeRaw<IndexedRepost>(
-      db,
-      `
-          INSERT INTO repost ("uri", "cid", "creator", "subject", "subjectCid", "createdAt", "indexedAt")
-          SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
-          ON CONFLICT DO NOTHING
-          RETURNING *
-        `,
-      toInsertRepost,
-    ).catch((e) => {
-      throw new Error('Failed to insert reposts', { cause: e })
-    }),
-    executeRaw(
-      db,
-      `
-          INSERT INTO feed_item ("type", "uri", "cid", "postUri", "originatorDid", "sortAt")
-          SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
-          ON CONFLICT DO NOTHING
-          RETURNING *
-        `,
-      toInsertFeedItem,
-    ).catch((e) => {
-      throw new Error('Failed to insert repost feed items', { cause: e })
-    }),
-  ])
-  return inserted || []
+  const client = await db.pool.connect()
+  try {
+    const [inserted] = await Promise.all([
+      copyIntoTable(
+        client,
+        'repost',
+        [
+          'uri',
+          'cid',
+          'creator',
+          'subject',
+          'subjectCid',
+          'createdAt',
+          'indexedAt',
+        ],
+        records.map(({ uri, cid, obj, timestamp }) => {
+          const createdAt = normalizeDatetimeAlways(obj.createdAt)
+          const indexedAt = timestamp
+          const sortAt =
+            new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+              ? createdAt
+              : indexedAt
+          return {
+            uri: uri.toString(),
+            cid: cid.toString(),
+            creator: uri.host,
+            subject: obj.subject.uri,
+            subjectCid: obj.subject.cid,
+            createdAt,
+            indexedAt,
+            sortAt,
+          }
+        }),
+      ),
+      copyIntoTable(
+        client,
+        'feed_item',
+        ['type', 'uri', 'cid', 'postUri', 'originatorDid', 'sortAt'],
+        records.map(({ uri, cid, obj, timestamp }) => {
+          const createdAt = normalizeDatetimeAlways(obj.createdAt)
+          const indexedAt = timestamp
+          const sortAt =
+            new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+              ? createdAt
+              : indexedAt
+          return {
+            type: 'post',
+            uri: uri.toString(),
+            cid: cid.toString(),
+            postUri: obj.subject.uri,
+            originatorDid: uri.host,
+            sortAt,
+          }
+        }),
+      ),
+    ])
+    return inserted
+  } finally {
+    client.release()
+  }
 }
 
 const findDuplicate = async (

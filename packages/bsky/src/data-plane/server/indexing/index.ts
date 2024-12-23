@@ -39,7 +39,7 @@ import RecordProcessor from './processor'
 import { subLogger } from '../../../logger'
 import { retryHttp } from '../../../util/retry'
 import { BackgroundQueue } from '../background'
-import { executeRaw, transpose } from '../util'
+import { copyIntoTable } from '../util'
 
 export class IndexingService {
   records: {
@@ -129,7 +129,7 @@ export class IndexingService {
       const indexingTx = this.transact(txn)
       const indexer = indexingTx.findIndexerForCollection(collection)
       if (!indexer) return
-      await indexer.insertBulkRecords(records, opts)
+      await indexer.insertBulkRecords(records)
     })
   }
 
@@ -144,13 +144,14 @@ export class IndexingService {
         timestamp: string
       }>
     >,
-    opts?: { disableNotifs?: boolean; disableLabels?: boolean },
   ) {
     const allRecords = [...records.values()].flat()
     if (!allRecords.length) return
 
     this.db.assertNotTransaction()
     await this.db.transaction(async (txn) => {
+      const client = await txn.pool.connect()
+
       await Promise.all([
         ...Array.from(records.entries()).map(async ([collection, records]) => {
           if (!records.length) return
@@ -163,7 +164,7 @@ export class IndexingService {
           }
           console.time(`bulk insert ${collection} ${records.length}`)
           return indexer
-            .insertBulkRecords(records, opts)
+            .insertBulkRecords(records)
             .catch((e) => {
               throw new Error(
                 `Failed to bulk insert records for collection ${collection}`,
@@ -174,30 +175,43 @@ export class IndexingService {
               console.timeEnd(`bulk insert ${collection} ${records.length}`),
             )
         }),
-        async () => {
-          const toInsertRecords = transpose(allRecords, (record) => [
-            /* uri: */ record.uri.toString(),
-            /* cid: */ record.cid.toString(),
-            /* did: */ record.uri.host,
-            /* json: */ stringifyLex(record.obj),
-            /* indexedAt: */ record.timestamp,
-          ])
-
-          return executeRaw(
-            this.db.db,
-            `
-            INSERT INTO record ("uri", "cid", "did", "json", "indexedAt")
-            SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
-            ON CONFLICT DO NOTHING
-          `,
-            toInsertRecords,
-          ).catch((e) => {
-            console.error(
-              `Failed to insert into records table from ${toInsertRecords[0][0]} to ${toInsertRecords[toInsertRecords.length - 1][0]}`,
-              e,
-            )
-          })
-        },
+        // async () => {
+        //   const toInsertRecords = transpose(allRecords, (record) => [
+        //     /* uri: */ record.uri.toString(),
+        //     /* cid: */ record.cid.toString(),
+        //     /* did: */ record.uri.host,
+        //     /* json: */ stringifyLex(record.obj),
+        //     /* indexedAt: */ record.timestamp,
+        //   ])
+        //
+        //   return executeRaw(
+        //     this.db.db,
+        //     `
+        //     INSERT INTO record ("uri", "cid", "did", "json", "indexedAt")
+        //     SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
+        //     ON CONFLICT DO NOTHING
+        //   `,
+        //     toInsertRecords,
+        //   ).catch((e) => {
+        //     console.error(
+        //       `Failed to insert into records table from ${toInsertRecords[0][0]} to ${toInsertRecords[toInsertRecords.length - 1][0]}`,
+        //       e,
+        //     )
+        //   })
+        // },
+        copyIntoTable(
+          client,
+          'record',
+          ['uri', 'cid', 'did', 'json', 'indexedAt', 'takedownRef'],
+          allRecords.map(({ uri, cid, obj, timestamp }) => ({
+            uri: uri.toString(),
+            cid: cid.toString(),
+            did: uri.host,
+            json: stringifyLex(obj),
+            indexedAt: timestamp,
+            takedownRef: null,
+          })),
+        ),
       ])
     })
   }

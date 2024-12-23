@@ -1,12 +1,13 @@
-import { CID } from 'multiformats/cid'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import { InvalidRequestError } from '@atproto/xrpc-server'
-import * as lex from '../../../../lexicon/lexicons'
+import { CID } from 'multiformats/cid'
 import * as Postgate from '../../../../lexicon/types/app/bsky/feed/postgate'
-import { BackgroundQueue } from '../../background'
-import { Database } from '../../db'
+import * as lex from '../../../../lexicon/lexicons'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { RecordProcessor } from '../processor'
+import { Database } from '../../db'
+import RecordProcessor from '../processor'
+import { BackgroundQueue } from '../../background'
+import { copyIntoTable } from '../../util'
 
 const lexId = lex.ids.AppBskyFeedPostgate
 type IndexedGate = DatabaseSchemaType['post_gate']
@@ -45,8 +46,34 @@ const insertFn = async (
   return inserted || null
 }
 
+// const insertBulkFn = async (
+//   db: DatabaseSchema,
+//   records: {
+//     uri: AtUri
+//     cid: CID
+//     obj: Postgate.Record
+//     timestamp: string
+//   }[],
+// ): Promise<Array<IndexedGate>> => {
+//   return db
+//     .insertInto('post_gate')
+//     .values(
+//       records.map(({ uri, cid, obj, timestamp }) => ({
+//         uri: uri.toString(),
+//         cid: cid.toString(),
+//         creator: uri.host,
+//         postUri: obj.post,
+//         createdAt: normalizeDatetimeAlways(obj.createdAt),
+//         indexedAt: timestamp,
+//       })),
+//     )
+//     .onConflict((oc) => oc.doNothing())
+//     .returningAll()
+//     .execute()
+// }
+
 const insertBulkFn = async (
-  db: DatabaseSchema,
+  db: Database,
   records: {
     uri: AtUri
     cid: CID
@@ -54,21 +81,25 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedGate>> => {
-  return db
-    .insertInto('post_gate')
-    .values(
-      records.map(({ uri, cid, obj, timestamp }) => ({
+  const client = await db.pool.connect()
+
+  return copyIntoTable(
+    client,
+    'post_gate',
+    ['uri', 'cid', 'creator', 'postUri', 'createdAt', 'indexedAt'],
+    records.map(({ uri, cid, obj, timestamp }) => {
+      const createdAt = normalizeDatetimeAlways(obj.createdAt)
+      const indexedAt = timestamp
+      return {
         uri: uri.toString(),
         cid: cid.toString(),
         creator: uri.host,
         postUri: obj.post,
-        createdAt: normalizeDatetimeAlways(obj.createdAt),
-        indexedAt: timestamp,
-      })),
-    )
-    .onConflict((oc) => oc.doNothing())
-    .returningAll()
-    .execute()
+        createdAt,
+        indexedAt,
+      }
+    }),
+  )
 }
 
 const findDuplicate = async (

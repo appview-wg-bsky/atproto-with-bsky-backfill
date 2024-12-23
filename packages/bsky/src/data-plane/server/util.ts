@@ -1,12 +1,14 @@
-import { RawNode, sql } from 'kysely'
+import { InsertObject, RawNode, sql } from 'kysely'
 import {
   Record as PostRecord,
   ReplyRef,
 } from '../../lexicon/types/app/bsky/feed/post'
 import { Record as GateRecord } from '../../lexicon/types/app/bsky/feed/threadgate'
-import { parseThreadGate } from '../../views/util'
-import { DatabaseSchema } from './db/database-schema'
+import DatabaseSchema, { DatabaseSchemaType } from './db/database-schema'
 import { valuesList } from './db/util'
+import { parseThreadGate } from '../../views/util'
+import { PoolClient } from 'pg'
+import { from as copyFrom } from 'pg-copy-streams'
 
 export const getDescendentsQb = (
   db: DatabaseSchema,
@@ -100,14 +102,13 @@ export const violatesThreadGate = async (
 ) => {
   const {
     canReply,
-    allowFollower,
     allowFollowing,
     allowListUris = [],
   } = parseThreadGate(replierDid, ownerDid, rootPost, gate)
   if (canReply) {
     return false
   }
-  if (!allowFollower && !allowFollowing && !allowListUris?.length) {
+  if (!allowFollowing && !allowListUris?.length) {
     return true
   }
   const { ref } = db.dynamic
@@ -115,14 +116,6 @@ export const violatesThreadGate = async (
   const check = await db
     .selectFrom(valuesList([replierDid]).as(sql`subject (did)`))
     .select([
-      allowFollower
-        ? db
-            .selectFrom('follow')
-            .where('subjectDid', '=', ownerDid)
-            .whereRef('creator', '=', ref('subject.did'))
-            .select('subjectDid')
-            .as('isFollower')
-        : nullResult.as('isFollower'),
       allowFollowing
         ? db
             .selectFrom('follow')
@@ -144,8 +137,6 @@ export const violatesThreadGate = async (
     .executeTakeFirst()
 
   if (allowFollowing && check?.isFollowed) {
-    return false
-  } else if (allowFollower && check?.isFollower) {
     return false
   } else if (allowListUris.length && check?.isInList) {
     return false
@@ -187,3 +178,60 @@ export const executeRaw = <RowType = unknown>(
   db.getExecutor().executeQuery<RowType>(raw(sql, parameters), {
     queryId: queryId ?? Math.random().toString(36).substring(2),
   })
+
+export const copyIntoTable = async <
+  Table extends keyof DatabaseSchemaType,
+  AllColumns extends keyof InsertObject<DatabaseSchemaType, Table> & string,
+  const Columns extends string[],
+  Rows extends ArrayIncludesAll<AllColumns, Columns> extends true
+    ? Record<keyof InsertObject<DatabaseSchemaType, Table>, unknown>[]
+    : 'error: columns array is not exhaustive',
+>(
+  client: PoolClient,
+  table: Table,
+  columns: Columns,
+  rows: Rows,
+): Promise<Rows> => {
+  const columnsStr = columns.map((c) => `"${c}"`).join(', ')
+  const stream = client.query(
+    copyFrom(
+      `COPY ${table} (${columnsStr}) FROM STDIN WITH (FORMAT csv, HEADER false, DELIMITER E'\u0007')`,
+      { highWaterMark: 1024 * 1024 * 1024 },
+    ),
+  )
+
+  for (const row of rows) {
+    const ok = stream.write(
+      columns
+        .map(
+          (c) =>
+            (typeof row[c] === 'string' ? row[c] : JSON.stringify(row[c])) ??
+            '',
+        )
+        .join('\u0007') + '\n',
+    )
+    if (!ok) {
+      await new Promise((resolve) => stream.once('drain', resolve))
+    }
+  }
+
+  const promise = new Promise<Rows>((resolve) =>
+    stream.once('finish', () => resolve(rows)),
+  )
+  stream.end()
+  return promise
+}
+
+type ArrayIncludes<T, Arr extends any[]> = Arr extends []
+  ? false
+  : Arr extends [infer Head, ...infer Tail]
+    ? Head extends T
+      ? true
+      : ArrayIncludes<T, Tail>
+    : never
+
+type ArrayIncludesAll<T extends string, Arr extends any[]> = {
+  [Member in T]: ArrayIncludes<Member, Arr>
+}[T] extends true
+  ? true
+  : false

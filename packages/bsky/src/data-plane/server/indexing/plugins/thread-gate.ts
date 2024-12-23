@@ -7,7 +7,7 @@ import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
 import { Database } from '../../db'
 import RecordProcessor from '../processor'
 import { BackgroundQueue } from '../../background'
-import { executeRaw, transpose } from '../../util'
+import { copyIntoTable, executeRaw, transpose } from '../../util'
 
 const lexId = lex.ids.AppBskyFeedThreadgate
 type IndexedGate = DatabaseSchemaType['thread_gate']
@@ -46,8 +46,54 @@ const insertFn = async (
   return inserted || null
 }
 
+// const insertBulkFn = async (
+//   db: DatabaseSchema,
+//   records: {
+//     uri: AtUri
+//     cid: CID
+//     obj: Threadgate.Record
+//     timestamp: string
+//   }[],
+// ): Promise<Array<IndexedGate>> => {
+//   for (const record of records) {
+//     const postUri = new AtUri(record.obj.post)
+//     if (postUri.host !== record.uri.host || postUri.rkey !== record.uri.rkey) {
+//       throw new InvalidRequestError(
+//         'Creator and rkey of thread gate does not match its post',
+//       )
+//     }
+//   }
+//
+//   const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
+//     /* uri: */ uri.toString(),
+//     /* cid: */ cid.toString(),
+//     /* creator: */ uri.host,
+//     /* postUri: */ obj.post,
+//     /* createdAt: */ normalizeDatetimeAlways(obj.createdAt),
+//     /* indexedAt: */ timestamp,
+//   ])
+//
+//   return executeRaw<IndexedGate>(
+//     db,
+//     `
+//       WITH "insert_threadgate" AS (
+//         INSERT INTO "thread_gate" ("uri", "cid", "creator", "postUri", "createdAt", "indexedAt")
+//         SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+//         ON CONFLICT DO NOTHING
+//         RETURNING *
+//       ),
+//       "update_post" AS (
+//         UPDATE "post" SET "hasThreadGate" = true
+//         WHERE "post"."uri" in (SELECT "postUri" FROM "insert_threadgate")
+//       )
+//       SELECT * FROM "insert_threadgate"
+//     `,
+//     toInsert,
+//   ).then((r) => r.rows)
+// }
+
 const insertBulkFn = async (
-  db: DatabaseSchema,
+  db: Database,
   records: {
     uri: AtUri
     cid: CID
@@ -64,32 +110,39 @@ const insertBulkFn = async (
     }
   }
 
-  const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
-    /* uri: */ uri.toString(),
-    /* cid: */ cid.toString(),
-    /* creator: */ uri.host,
-    /* postUri: */ obj.post,
-    /* createdAt: */ normalizeDatetimeAlways(obj.createdAt),
-    /* indexedAt: */ timestamp,
-  ])
-
-  return executeRaw<IndexedGate>(
-    db,
-    `
-      WITH "insert_threadgate" AS (
-        INSERT INTO "thread_gate" ("uri", "cid", "creator", "postUri", "createdAt", "indexedAt")
-        SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
-        ON CONFLICT DO NOTHING
-        RETURNING *
+  const client = await db.pool.connect()
+  try {
+    const [inserted] = await Promise.all([
+      copyIntoTable(
+        client,
+        'thread_gate',
+        ['uri', 'cid', 'creator', 'postUri', 'createdAt', 'indexedAt'],
+        records.map(({ uri, cid, obj, timestamp }) => {
+          const createdAt = normalizeDatetimeAlways(obj.createdAt)
+          const indexedAt = timestamp
+          return {
+            uri: uri.toString(),
+            cid: cid.toString(),
+            creator: uri.host,
+            postUri: obj.post,
+            createdAt,
+            indexedAt,
+          }
+        }),
       ),
-      "update_post" AS (
-        UPDATE "post" SET "hasThreadGate" = true
-        WHERE "post"."uri" in (SELECT "postUri" FROM "insert_threadgate")
-      )
-      SELECT * FROM "insert_threadgate"
-    `,
-    toInsert,
-  ).then((r) => r.rows)
+      executeRaw(
+        db.db,
+        `
+            UPDATE "post" SET "hasThreadGate" = true
+            WHERE "post"."uri" in (SELECT * from unnest($1::text[]))
+          `,
+        records.map(({ uri }) => uri.toString()),
+      ),
+    ])
+    return inserted
+  } finally {
+    client.release()
+  }
 }
 
 const findDuplicate = async (

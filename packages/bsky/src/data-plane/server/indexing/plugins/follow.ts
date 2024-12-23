@@ -8,7 +8,7 @@ import { Database } from '../../db'
 import { countAll, excluded } from '../../db/util'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
 import { BackgroundQueue } from '../../background'
-import { executeRaw, transpose } from '../../util'
+import { copyIntoTable } from '../../util'
 
 const lexId = lex.ids.AppBskyGraphFollow
 type IndexedFollow = Selectable<DatabaseSchemaType['follow']>
@@ -36,8 +36,41 @@ const insertFn = async (
   return inserted || null
 }
 
+// const insertBulkFn = async (
+//   db: DatabaseSchema,
+//   records: {
+//     uri: AtUri
+//     cid: CID
+//     obj: Follow.Record
+//     timestamp: string
+//   }[],
+// ): Promise<Array<IndexedFollow>> => {
+//   const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
+//     uri.toString(),
+//     cid.toString(),
+//     uri.host,
+//     obj.subject,
+//     normalizeDatetimeAlways(obj.createdAt),
+//     timestamp,
+//   ])
+//
+//   const { rows } = await executeRaw<IndexedFollow>(
+//     db,
+//     `
+//       INSERT INTO follow ("uri", "cid", "creator", "subjectDid", "createdAt", "indexedAt")
+//       SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+//       ON CONFLICT DO NOTHING
+//       RETURNING *
+//     `,
+//     toInsert,
+//   ).catch((e) => {
+//     throw new Error('Failed to insert follows', { cause: e })
+//   })
+//   return rows
+// }
+
 const insertBulkFn = async (
-  db: DatabaseSchema,
+  db: Database,
   records: {
     uri: AtUri
     cid: CID
@@ -45,28 +78,33 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedFollow>> => {
-  const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
-    uri.toString(),
-    cid.toString(),
-    uri.host,
-    obj.subject,
-    normalizeDatetimeAlways(obj.createdAt),
-    timestamp,
-  ])
-
-  const { rows } = await executeRaw<IndexedFollow>(
-    db,
-    `
-      INSERT INTO follow ("uri", "cid", "creator", "subjectDid", "createdAt", "indexedAt")
-      SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
-      ON CONFLICT DO NOTHING
-      RETURNING *
-    `,
-    toInsert,
-  ).catch((e) => {
-    throw new Error('Failed to insert follows', { cause: e })
-  })
-  return rows
+  const client = await db.pool.connect()
+  try {
+    return copyIntoTable(
+      client,
+      'follow',
+      ['uri', 'cid', 'creator', 'subjectDid', 'createdAt', 'indexedAt'],
+      records.map(({ uri, cid, obj, timestamp }) => {
+        const createdAt = normalizeDatetimeAlways(obj.createdAt)
+        const indexedAt = timestamp
+        const sortAt =
+          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+            ? createdAt
+            : indexedAt
+        return {
+          uri: uri.toString(),
+          cid: cid.toString(),
+          creator: uri.host,
+          subjectDid: obj.subject,
+          createdAt,
+          indexedAt,
+          sortAt,
+        }
+      }),
+    )
+  } finally {
+    client.release()
+  }
 }
 
 const findDuplicate = async (

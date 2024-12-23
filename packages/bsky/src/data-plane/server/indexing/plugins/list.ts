@@ -1,12 +1,13 @@
 import { Selectable } from 'kysely'
-import { CID } from 'multiformats/cid'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
-import * as lex from '../../../../lexicon/lexicons'
+import { CID } from 'multiformats/cid'
 import * as List from '../../../../lexicon/types/app/bsky/graph/list'
-import { BackgroundQueue } from '../../background'
-import { Database } from '../../db'
+import * as lex from '../../../../lexicon/lexicons'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { RecordProcessor } from '../processor'
+import RecordProcessor from '../processor'
+import { Database } from '../../db'
+import { BackgroundQueue } from '../../background'
+import { copyIntoTable } from '../../util'
 
 const lexId = lex.ids.AppBskyGraphList
 type IndexedList = Selectable<DatabaseSchemaType['list']>
@@ -40,8 +41,40 @@ const insertFn = async (
   return inserted || null
 }
 
+// const insertBulkFn = async (
+//   db: DatabaseSchema,
+//   records: {
+//     uri: AtUri
+//     cid: CID
+//     obj: List.Record
+//     timestamp: string
+//   }[],
+// ): Promise<Array<IndexedList>> => {
+//   return db
+//     .insertInto('list')
+//     .values(
+//       records.map(({ uri, cid, obj, timestamp }) => ({
+//         uri: uri.toString(),
+//         cid: cid.toString(),
+//         creator: uri.host,
+//         name: obj.name,
+//         purpose: obj.purpose,
+//         description: obj.description,
+//         descriptionFacets: obj.descriptionFacets
+//           ? JSON.stringify(obj.descriptionFacets)
+//           : undefined,
+//         avatarCid: obj.avatar?.ref.toString(),
+//         createdAt: normalizeDatetimeAlways(obj.createdAt),
+//         indexedAt: timestamp,
+//       })),
+//     )
+//     .onConflict((oc) => oc.doNothing())
+//     .returningAll()
+//     .execute()
+// }
+
 const insertBulkFn = async (
-  db: DatabaseSchema,
+  db: Database,
   records: {
     uri: AtUri
     cid: CID
@@ -49,27 +82,50 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedList>> => {
-  return db
-    .insertInto('list')
-    .values(
-      records.map(({ uri, cid, obj, timestamp }) => ({
-        uri: uri.toString(),
-        cid: cid.toString(),
-        creator: uri.host,
-        name: obj.name,
-        purpose: obj.purpose,
-        description: obj.description,
-        descriptionFacets: obj.descriptionFacets
-          ? JSON.stringify(obj.descriptionFacets)
-          : undefined,
-        avatarCid: obj.avatar?.ref.toString(),
-        createdAt: normalizeDatetimeAlways(obj.createdAt),
-        indexedAt: timestamp,
-      })),
+  const client = await db.pool.connect()
+  try {
+    return copyIntoTable(
+      client,
+      'list',
+      [
+        'uri',
+        'cid',
+        'creator',
+        'name',
+        'purpose',
+        'description',
+        'descriptionFacets',
+        'avatarCid',
+        'createdAt',
+        'indexedAt',
+      ],
+      records.map(({ uri, cid, obj, timestamp }) => {
+        const createdAt = normalizeDatetimeAlways(obj.createdAt)
+        const indexedAt = timestamp
+        const sortAt =
+          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+            ? createdAt
+            : indexedAt
+        return {
+          uri: uri.toString(),
+          cid: cid.toString(),
+          creator: uri.host,
+          name: obj.name,
+          purpose: obj.purpose,
+          description: obj.description ?? null,
+          descriptionFacets: obj.descriptionFacets
+            ? JSON.stringify(obj.descriptionFacets)
+            : null,
+          avatarCid: obj.avatar?.ref.toString() ?? null,
+          createdAt,
+          indexedAt,
+          sortAt,
+        }
+      }),
     )
-    .onConflict((oc) => oc.doNothing())
-    .returningAll()
-    .execute()
+  } finally {
+    client.release()
+  }
 }
 
 const findDuplicate = async (): Promise<AtUri | null> => {

@@ -8,7 +8,7 @@ import RecordProcessor from '../processor'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
 import { BackgroundQueue } from '../../background'
-import { executeRaw, transpose } from '../../util'
+import { copyIntoTable } from '../../util'
 
 const lexId = lex.ids.AppBskyGraphListitem
 type IndexedListItem = Selectable<DatabaseSchemaType['list_item']>
@@ -57,8 +57,41 @@ const findDuplicate = async (
   return found ? new AtUri(found.uri) : null
 }
 
+// const insertBulkFn = async (
+//   db: DatabaseSchema,
+//   records: {
+//     uri: AtUri
+//     cid: CID
+//     obj: ListItem.Record
+//     timestamp: string
+//   }[],
+// ): Promise<Array<IndexedListItem>> => {
+//   const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
+//     /* uri: */ uri.toString(),
+//     /* cid: */ cid.toString(),
+//     /* creator: */ uri.host,
+//     /* subjectDid: */ obj.subject,
+//     /* listUri: */ obj.list,
+//     /* createdAt: */ normalizeDatetimeAlways(obj.createdAt),
+//     /* indexedAt: */ timestamp,
+//   ])
+//   return executeRaw<IndexedListItem>(
+//     db,
+//     `
+//     INSERT INTO list_item ("uri", "cid", "creator", "subjectDid", "listUri", "createdAt", "indexedAt")
+//     SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+//     ON CONFLICT DO NOTHING
+//   `,
+//     toInsert,
+//   )
+//     .then((r) => r.rows)
+//     .catch((e) => {
+//       throw new Error(`Failed to insert list items`, { cause: e })
+//     })
+// }
+
 const insertBulkFn = async (
-  db: DatabaseSchema,
+  db: Database,
   records: {
     uri: AtUri
     cid: CID
@@ -66,28 +99,42 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedListItem>> => {
-  const toInsert = transpose(records, ({ uri, cid, obj, timestamp }) => [
-    /* uri: */ uri.toString(),
-    /* cid: */ cid.toString(),
-    /* creator: */ uri.host,
-    /* subjectDid: */ obj.subject,
-    /* listUri: */ obj.list,
-    /* createdAt: */ normalizeDatetimeAlways(obj.createdAt),
-    /* indexedAt: */ timestamp,
-  ])
-  return executeRaw<IndexedListItem>(
-    db,
-    `
-    INSERT INTO list_item ("uri", "cid", "creator", "subjectDid", "listUri", "createdAt", "indexedAt")
-    SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
-    ON CONFLICT DO NOTHING
-  `,
-    toInsert,
-  )
-    .then((r) => r.rows)
-    .catch((e) => {
-      throw new Error(`Failed to insert list items`, { cause: e })
-    })
+  const client = await db.pool.connect()
+  try {
+    return copyIntoTable(
+      client,
+      'list_item',
+      [
+        'uri',
+        'cid',
+        'creator',
+        'subjectDid',
+        'listUri',
+        'createdAt',
+        'indexedAt',
+      ],
+      records.map(({ uri, cid, obj, timestamp }) => {
+        const createdAt = normalizeDatetimeAlways(obj.createdAt)
+        const indexedAt = timestamp
+        const sortAt =
+          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+            ? createdAt
+            : indexedAt
+        return {
+          uri: uri.toString(),
+          cid: cid.toString(),
+          creator: uri.host,
+          subjectDid: obj.subject,
+          listUri: obj.list,
+          createdAt,
+          indexedAt,
+          sortAt,
+        }
+      }),
+    )
+  } finally {
+    client.release()
+  }
 }
 
 const notifsForInsert = () => {

@@ -1,22 +1,20 @@
-import { Insertable, InsertObject, Selectable, sql } from 'kysely'
+import { Insertable, Selectable, sql } from 'kysely'
 import { CID } from 'multiformats/cid'
-import { jsonStringToLex } from '@atproto/lexicon'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
-import * as lex from '../../../../lexicon/lexicons'
-import { isMain as isEmbedExternal } from '../../../../lexicon/types/app/bsky/embed/external'
-import { isMain as isEmbedImage } from '../../../../lexicon/types/app/bsky/embed/images'
-import { isMain as isEmbedRecord } from '../../../../lexicon/types/app/bsky/embed/record'
-import { isMain as isEmbedRecordWithMedia } from '../../../../lexicon/types/app/bsky/embed/recordWithMedia'
-import { isMain as isEmbedVideo } from '../../../../lexicon/types/app/bsky/embed/video'
+import { jsonStringToLex } from '@atproto/lexicon'
 import {
   Record as PostRecord,
   ReplyRef,
 } from '../../../../lexicon/types/app/bsky/feed/post'
-import { Record as PostgateRecord } from '../../../../lexicon/types/app/bsky/feed/postgate'
 import { Record as GateRecord } from '../../../../lexicon/types/app/bsky/feed/threadgate'
+import { Record as PostgateRecord } from '../../../../lexicon/types/app/bsky/feed/postgate'
+import { isMain as isEmbedImage } from '../../../../lexicon/types/app/bsky/embed/images'
+import { isMain as isEmbedExternal } from '../../../../lexicon/types/app/bsky/embed/external'
+import { isMain as isEmbedRecord } from '../../../../lexicon/types/app/bsky/embed/record'
+import { isMain as isEmbedRecordWithMedia } from '../../../../lexicon/types/app/bsky/embed/recordWithMedia'
 import {
-  isLink,
   isMention,
+  isLink,
 } from '../../../../lexicon/types/app/bsky/richtext/facet'
 import { $Typed } from '../../../../lexicon/util'
 import {
@@ -28,8 +26,11 @@ import { RecordWithMedia } from '../../../../views/types'
 import { parsePostgate } from '../../../../views/util'
 import { BackgroundQueue } from '../../background'
 import { Database } from '../../db'
+import * as lex from '../../../../lexicon/lexicons'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
+import RecordProcessor from '../processor'
 import { Notification } from '../../db/tables/notification'
+import { Database } from '../../db'
 import { countAll, excluded } from '../../db/util'
 import {
   executeRaw,
@@ -39,14 +40,20 @@ import {
   transpose,
   violatesThreadGate as checkViolatesThreadGate,
 } from '../../util'
-import { RecordProcessor } from '../processor'
+import { BackgroundQueue } from '../../background'
+import { parsePostgate } from '../../../../views/util'
+import {
+  postUriToThreadgateUri,
+  postUriToPostgateUri,
+  uriToDid,
+} from '../../../../util/uris'
+import { copyIntoTable } from '../../util'
 
 type Notif = Insertable<Notification>
 type Post = Selectable<DatabaseSchemaType['post']>
 type PostEmbedImage = DatabaseSchemaType['post_embed_image']
 type PostEmbedExternal = DatabaseSchemaType['post_embed_external']
 type PostEmbedRecord = DatabaseSchemaType['post_embed_record']
-type PostEmbedVideo = DatabaseSchemaType['post_embed_video']
 type PostAncestor = {
   uri: string
   height: number
@@ -61,12 +68,7 @@ type PostDescendent = {
 type IndexedPost = {
   post: Post
   facets?: { type: 'mention' | 'link'; value: string }[]
-  embeds?: (
-    | PostEmbedImage[]
-    | PostEmbedExternal
-    | PostEmbedRecord
-    | PostEmbedVideo
-  )[]
+  embeds?: (PostEmbedImage[] | PostEmbedExternal | PostEmbedRecord)[]
   ancestors?: PostAncestor[]
   descendents?: PostDescendent[]
   threadgate?: GateRecord
@@ -160,12 +162,7 @@ const insertFn = async (
       return []
     })
   // Embed indices
-  const embeds: (
-    | PostEmbedImage[]
-    | PostEmbedExternal
-    | PostEmbedRecord
-    | PostEmbedVideo
-  )[] = []
+  const embeds: (PostEmbedImage[] | PostEmbedExternal | PostEmbedRecord)[] = []
   const postEmbeds = separateEmbeds(obj.embed)
   for (const postEmbed of postEmbeds) {
     if (isEmbedImage(postEmbed)) {
@@ -249,16 +246,16 @@ const insertFn = async (
         }
       }
     } else if (isEmbedVideo(postEmbed)) {
-      const { video } = postEmbed
-      const videoEmbed = {
-        postUri: uri.toString(),
-        videoCid: video.ref.toString(),
-        // @NOTE: alt is required for image but not for video on the lexicon.
-        alt: postEmbed.alt ?? null,
-      }
-      embeds.push(videoEmbed)
-
-      await db.insertInto('post_embed_video').values(videoEmbed).execute()
+	    const { video } = postEmbed
+	    const videoEmbed = {
+		    postUri: uri.toString(),
+		    videoCid: video.ref.toString(),
+		    // @NOTE: alt is required for image but not for video on the lexicon.
+		    alt: postEmbed.alt ?? null,
+	    }
+	    embeds.push(videoEmbed)
+	    
+	    await db.insertInto('post_embed_video').values(videoEmbed).execute()
     }
   }
 
@@ -290,7 +287,7 @@ const insertFn = async (
 }
 
 const insertBulkFn = async (
-  db: DatabaseSchema,
+  db: Database,
   records: Array<{
     uri: AtUri
     cid: CID
@@ -298,58 +295,81 @@ const insertBulkFn = async (
     timestamp: string
   }>,
 ): Promise<IndexedPost[]> => {
-  const toInsertPost = transpose(records, ({ uri, cid, obj, timestamp }) => [
-    uri.toString(),
-    cid.toString(),
-    uri.host,
-    obj.text,
-    normalizeDatetimeAlways(obj.createdAt),
-    obj.reply?.root?.uri || null,
-    obj.reply?.root?.cid || null,
-    obj.reply?.parent?.uri || null,
-    obj.reply?.parent?.cid || null,
-    obj.langs?.length ? JSON.stringify(obj.langs) : null,
-    obj.tags?.length ? JSON.stringify(obj.tags) : null,
-    timestamp,
-  ])
+  const client = await db.pool.connect()
 
-  const toInsertFeedItem = transpose(
-    records,
-    ({ uri, cid, obj, timestamp }) => [
+  const [insertedPosts] = await Promise.all([
+    copyIntoTable(
+      client,
       'post',
-      uri.toString(),
-      cid.toString(),
-      uri.toString(),
-      uri.host,
-      timestamp < obj.createdAt ? timestamp : obj.createdAt,
-    ],
-  )
-
-  const [{ rows: insertedPosts }] = await Promise.all([
-    executeRaw<Post>(
-      db,
-      `
-          INSERT INTO post ("uri", "cid", "creator", "text", "createdAt", "replyRoot", "replyRootCid", "replyParent", "replyParentCid", "langs", "tags", "indexedAt")
-            SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::jsonb[], $11::jsonb[], $12::text[])
-          ON CONFLICT DO NOTHING
-          RETURNING *
-        `,
-      toInsertPost,
-    ).catch((e) => {
-      throw new Error('Failed to insert posts', { cause: e })
-    }),
-    executeRaw(
-      db,
-      `
-          INSERT INTO feed_item ("type", "uri", "cid", "postUri", "originatorDid", "sortAt")
-            SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
-          ON CONFLICT DO NOTHING
-          RETURNING *
-        `,
-      toInsertFeedItem,
-    ).catch((e) => {
-      throw new Error('Failed to insert post feed items', { cause: e })
-    }),
+      [
+        'uri',
+        'cid',
+        'creator',
+        'text',
+        'createdAt',
+        'replyRoot',
+        'replyRootCid',
+        'replyParent',
+        'replyParentCid',
+        'langs',
+        'tags',
+        'invalidReplyRoot',
+        'violatesThreadGate',
+        'violatesEmbeddingRules',
+        'hasThreadGate',
+        'hasPostGate',
+        'indexedAt',
+      ],
+      records.map(({ uri, cid, obj, timestamp }) => {
+        const createdAt = normalizeDatetimeAlways(obj.createdAt)
+        const indexedAt = timestamp
+        const sortAt =
+          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+            ? createdAt
+            : indexedAt
+        return {
+          uri: uri.toString(),
+          cid: cid.toString(),
+          creator: uri.host,
+          text: obj.text,
+          createdAt,
+          replyRoot: obj.reply?.root.uri ?? null,
+          replyRootCid: obj.reply?.root.cid ?? null,
+          replyParent: obj.reply?.parent.uri ?? null,
+          replyParentCid: obj.reply?.parent.cid ?? null,
+          langs: obj.langs?.length ? obj.langs : null,
+          tags: obj.tags?.length ? obj.tags : null,
+          invalidReplyRoot: null,
+          violatesThreadGate: null,
+          violatesEmbeddingRules: null,
+          hasThreadGate: null,
+          hasPostGate: null,
+          indexedAt,
+          sortAt,
+        }
+      }),
+    ),
+    copyIntoTable(
+      client,
+      'feed_item',
+      ['type', 'uri', 'cid', 'postUri', 'originatorDid', 'sortAt'],
+      records.map(({ uri, cid, obj, timestamp }) => {
+        const createdAt = normalizeDatetimeAlways(obj.createdAt)
+        const indexedAt = timestamp
+        const sortAt =
+          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+            ? createdAt
+            : indexedAt
+        return {
+          type: 'post',
+          uri: uri.toString(),
+          cid: cid.toString(),
+          postUri: uri.toString(),
+          originatorDid: uri.host,
+          sortAt,
+        }
+      }),
+    ),
   ])
   if (!insertedPosts.length) {
     return []
@@ -362,7 +382,7 @@ const insertBulkFn = async (
         if (!record?.reply) return
 
         const { invalidReplyRoot, violatesThreadGate } = await validateReply(
-          db,
+          db.db,
           insertedPost.creator,
           record.reply,
         )
@@ -389,7 +409,7 @@ const insertBulkFn = async (
   )
 
   const invalidReplyUpdatesQuery = executeRaw(
-    db,
+    db.db,
     `
     UPDATE post SET "invalidReplyRoot" = v."invalidReplyRoot", "violatesThreadGate" = v."violatesThreadGate"
     FROM (
@@ -400,14 +420,23 @@ const insertBulkFn = async (
     toInsertInvalidReplyUpdates,
   )
 
-  const embedInserts: {
-    post_embed_image?: InsertObject<DatabaseSchemaType, 'post_embed_image'>[]
-    post_embed_external?: InsertObject<
-      DatabaseSchemaType,
-      'post_embed_external'
+  const insertRows: {
+    post_embed_image?: Record<
+      keyof DatabaseSchemaType['post_embed_image'],
+      string | null | undefined
     >[]
-    post_embed_record?: InsertObject<DatabaseSchemaType, 'post_embed_record'>[]
-    quote?: InsertObject<DatabaseSchemaType, 'quote'>[]
+    post_embed_external?: Record<
+      keyof DatabaseSchemaType['post_embed_external'],
+      string | null | undefined
+    >[]
+    post_embed_record?: Record<
+      keyof DatabaseSchemaType['post_embed_record'],
+      string | null | undefined
+    >[]
+    quote?: Record<
+      keyof DatabaseSchemaType['quote'],
+      string | null | undefined
+    >[]
     post_agg_quotedPosts?: Map<string, string>
     post_updates_violatesEmbeddingRules?: {
       uri: string
@@ -429,14 +458,14 @@ const insertBulkFn = async (
             if (!imageCid) return
             return {
               postUri: post.uri,
-              position: i,
+              position: `${i}`,
               imageCid,
               alt: img.alt,
             }
           })
           .filter((e) => !!e)
-        embedInserts.post_embed_image ??= []
-        embedInserts.post_embed_image.push(...imagesEmbed)
+        insertRows.post_embed_image ??= []
+        insertRows.post_embed_image.push(...imagesEmbed)
       } else if (isEmbedExternal(postEmbed)) {
         const { external } = postEmbed
         const externalEmbed = {
@@ -446,8 +475,8 @@ const insertBulkFn = async (
           description: external.description,
           thumbCid: external.thumb?.ref.toString() ?? null,
         }
-        embedInserts.post_embed_external ??= []
-        embedInserts.post_embed_external.push(externalEmbed)
+        insertRows.post_embed_external ??= []
+        insertRows.post_embed_external.push(externalEmbed)
       } else if (isEmbedRecord(postEmbed)) {
         const { record } = postEmbed
         const embedUri = new AtUri(record.uri)
@@ -456,33 +485,40 @@ const insertBulkFn = async (
           embedUri: record.uri,
           embedCid: record.cid,
         }
-        embedInserts.post_embed_record ??= []
-        embedInserts.post_embed_record.push(recordEmbed)
+        insertRows.post_embed_record ??= []
+        insertRows.post_embed_record.push(recordEmbed)
 
         if (embedUri.collection === lex.ids.AppBskyFeedPost) {
+          const createdAt = normalizeDatetimeAlways(post.createdAt)
+          const indexedAt = post.indexedAt
+          const sortAt =
+            new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+              ? createdAt
+              : indexedAt
           const quote = {
             uri: post.uri,
             cid: post.cid,
             subject: record.uri,
             subjectCid: record.cid,
-            createdAt: normalizeDatetimeAlways(post.createdAt),
-            indexedAt: post.indexedAt,
+            createdAt,
+            indexedAt,
+            sortAt,
           }
-          embedInserts.quote ??= []
-          embedInserts.quote.push(quote)
+          insertRows.quote ??= []
+          insertRows.quote.push(quote)
 
-          embedInserts.post_agg_quotedPosts ??= new Map()
-          embedInserts.post_agg_quotedPosts.set(record.cid, record.uri)
+          insertRows.post_agg_quotedPosts ??= new Map()
+          insertRows.post_agg_quotedPosts.set(record.cid, record.uri)
 
           const { violatesEmbeddingRules } = await validatePostEmbed(
-            db,
+            db.db,
             embedUri.toString(),
             post.uri,
           )
           Object.assign(post, { violatesEmbeddingRules })
           if (violatesEmbeddingRules) {
-            embedInserts.post_updates_violatesEmbeddingRules ??= []
-            embedInserts.post_updates_violatesEmbeddingRules.push({
+            insertRows.post_updates_violatesEmbeddingRules ??= []
+            insertRows.post_updates_violatesEmbeddingRules.push({
               uri: post.uri,
               violatesEmbeddingRules,
             })
@@ -493,13 +529,13 @@ const insertBulkFn = async (
   }
 
   const toInsertViolatesEmbeddingRules = transpose(
-    embedInserts.post_updates_violatesEmbeddingRules ?? [],
+    insertRows.post_updates_violatesEmbeddingRules ?? [],
     (v) => [v.uri, v.violatesEmbeddingRules],
   )
   const violatesEmbeddingRulesQuery =
-    embedInserts.post_updates_violatesEmbeddingRules?.length &&
+    insertRows.post_updates_violatesEmbeddingRules?.length &&
     executeRaw(
-      db,
+      db.db,
       `
       UPDATE post SET "violatesEmbeddingRules" = v."violatesEmbeddingRules"
       FROM (
@@ -512,41 +548,44 @@ const insertBulkFn = async (
 
   await Promise.all([
     invalidReplyUpdatesQuery,
-    embedInserts.post_embed_image &&
-      db
-        .insertInto('post_embed_image')
-        .values(embedInserts.post_embed_image)
-        .execute()
-        .catch((e) => {
-          throw new Error('Failed to insert post embed images', { cause: e })
-        }),
-    embedInserts.post_embed_external &&
-      db
-        .insertInto('post_embed_external')
-        .values(embedInserts.post_embed_external)
-        .execute()
-        .catch((e) => {
-          throw new Error('Failed to insert post embed externals', { cause: e })
-        }),
-    embedInserts.post_embed_record &&
-      db
-        .insertInto('post_embed_record')
-        .values(embedInserts.post_embed_record)
-        .execute()
-        .catch((e) => {
-          throw new Error('Failed to insert post embed records', { cause: e })
-        }),
-    embedInserts.quote &&
-      db
-        .insertInto('quote')
-        .values(embedInserts.quote)
-        .onConflict((oc) => oc.doNothing())
-        .execute()
-        .catch((e) => {
-          throw new Error('Failed to insert quotes', { cause: e })
-        }),
-    embedInserts.post_agg_quotedPosts?.size &&
-      db
+    insertRows.post_embed_image &&
+      copyIntoTable(
+        client,
+        'post_embed_image',
+        ['postUri', 'position', 'imageCid', 'alt'],
+        insertRows.post_embed_image,
+      ),
+    insertRows.post_embed_external &&
+      copyIntoTable(
+        client,
+        'post_embed_external',
+        ['postUri', 'uri', 'title', 'description', 'thumbCid'],
+        insertRows.post_embed_external,
+      ),
+    insertRows.post_embed_record &&
+      copyIntoTable(
+        client,
+        'post_embed_record',
+        ['postUri', 'embedUri', 'embedCid'],
+        insertRows.post_embed_record,
+      ),
+    insertRows.quote &&
+      copyIntoTable(
+        client,
+        'quote',
+        [
+          'uri',
+          'cid',
+          'subject',
+          'subjectCid',
+          'createdAt',
+          'indexedAt',
+          'sortAt',
+        ],
+        insertRows.quote,
+      ),
+    insertRows.post_agg_quotedPosts?.size &&
+      db.db
         .insertInto('post_agg')
         .columns(['uri', 'quoteCount'])
         .expression((eb) =>
@@ -555,7 +594,7 @@ const insertBulkFn = async (
             .where(
               'quote.subjectCid',
               'in',
-              Array.from(embedInserts.post_agg_quotedPosts!.keys()),
+              Array.from(insertRows.post_agg_quotedPosts!.keys()),
             )
             .groupBy(['subjectCid', 'subject'])
             .select(['subject as uri', countAll.as('quoteCount')]),
@@ -563,7 +602,7 @@ const insertBulkFn = async (
         .onConflict((oc) =>
           oc
             .column('uri')
-            .doUpdateSet({ quoteCount: excluded(db, 'quoteCount') }),
+            .doUpdateSet({ quoteCount: excluded(db.db, 'quoteCount') }),
         )
         .execute()
         .catch((e) => {
