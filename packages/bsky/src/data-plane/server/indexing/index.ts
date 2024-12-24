@@ -202,14 +202,13 @@ export class IndexingService {
         copyIntoTable(
           client,
           'record',
-          ['uri', 'cid', 'did', 'json', 'indexedAt', 'takedownRef'],
+          ['uri', 'cid', 'did', 'json', 'indexedAt'],
           allRecords.map(({ uri, cid, obj, timestamp }) => ({
             uri: uri.toString(),
             cid: cid.toString(),
             did: uri.host,
             json: stringifyLex(obj),
             indexedAt: timestamp,
-            takedownRef: null,
           })),
         ),
       ])

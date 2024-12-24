@@ -181,11 +181,11 @@ export const executeRaw = <RowType = unknown>(
 
 export const copyIntoTable = async <
   Table extends keyof DatabaseSchemaType,
-  AllColumns extends keyof InsertObject<DatabaseSchemaType, Table> & string,
+  AllColumns extends NonNullableInsertKeys<DatabaseSchemaType[Table]> & string,
   const Columns extends string[],
   Rows extends ArrayIncludesAll<AllColumns, Columns> extends true
-    ? Record<keyof InsertObject<DatabaseSchemaType, Table>, unknown>[]
-    : 'error: columns array is not exhaustive',
+    ? Record<NonNullableInsertKeys<DatabaseSchemaType[Table]>, unknown>[]
+    : ['error: columns array is not exhaustive'],
 >(
   client: PoolClient,
   table: Table,

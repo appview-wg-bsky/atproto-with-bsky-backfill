@@ -7,7 +7,7 @@ import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
 import RecordProcessor from '../processor'
 import { BackgroundQueue } from '../../background'
-import { createCopyWriter } from '../../util'
+import { copyIntoTable } from '../../util'
 
 const lexId = lex.ids.AppBskyLabelerService
 type IndexedLabeler = Selectable<DatabaseSchemaType['labeler']>
@@ -69,38 +69,32 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedLabeler>> => {
-  const inserted: IndexedLabeler[] = []
   const client = await db.pool.connect()
   try {
-    const write = createCopyWriter(client, 'labeler', [
-      'uri',
-      'cid',
-      'creator',
-      'createdAt',
-      'indexedAt',
-    ])
-    for (const { uri, cid, obj, timestamp } of records) {
-      const createdAt = normalizeDatetimeAlways(obj.createdAt)
-      const indexedAt = timestamp
-      const sortAt =
-        new Date(createdAt).getTime() < new Date(indexedAt).getTime()
-          ? createdAt
-          : indexedAt
-      const toInsert = {
-        uri: uri.toString(),
-        cid: cid.toString(),
-        creator: uri.host,
-        createdAt,
-        indexedAt,
-        sortAt,
-      }
-      inserted.push(toInsert)
-      write(toInsert)
-    }
+    return copyIntoTable(
+      client,
+      'labeler',
+      ['uri', 'cid', 'creator', 'createdAt', 'indexedAt'],
+      records.map(({ uri, cid, obj, timestamp }) => {
+        const createdAt = normalizeDatetimeAlways(obj.createdAt)
+        const indexedAt = timestamp
+        const sortAt =
+          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+            ? createdAt
+            : indexedAt
+        return {
+          uri: uri.toString(),
+          cid: cid.toString(),
+          creator: uri.host,
+          createdAt,
+          indexedAt,
+          sortAt,
+        }
+      }),
+    )
   } finally {
     client.release()
   }
-  return inserted
 }
 
 const findDuplicate = async (): Promise<AtUri | null> => {
