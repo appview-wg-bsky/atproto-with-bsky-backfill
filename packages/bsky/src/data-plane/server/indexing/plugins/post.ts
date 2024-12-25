@@ -527,7 +527,9 @@ const insertBulkFn = async (
       WHERE post.uri = v.uri
     `,
       toInsertViolatesEmbeddingRules,
-    )
+    ).catch((e) => {
+      throw new Error('Failed to update violatesEmbeddingRules', { cause: e })
+    })
 
   await Promise.all([
     insertRows.post_embed_image &&
@@ -978,33 +980,39 @@ async function validatePostEmbedsBulk(
     {} as Record<string, { parentUri: string; embedUri: string }>,
   )
 
-  const postgateRecords = await db
-    .selectFrom('record')
-    .where('record.uri', 'in', Object.keys(uris))
-    .selectAll()
-    .execute()
+  const { rows: postgateRecords } = await executeRaw<
+    DatabaseSchemaType['record']
+  >(
+    db,
+    `
+    SELECT * FROM record WHERE record.uri IN (SELECT uri FROM unnest($1::text[]))
+    `,
+    [Object.keys(uris)],
+  )
 
-  return postgateRecords.map((record) => {
-    const {
-      embeddingRules: { canEmbed },
-    } = parsePostgate({
-      gate: jsonStringToLex(record.json) as PostgateRecord,
-      viewerDid: uriToDid(uris[record.uri].parentUri),
-      authorDid: uriToDid(uris[record.uri].embedUri),
-    })
-    if (canEmbed) {
-      return {
+  return postgateRecords.reduce(
+    (acc, record) => {
+      if (!record.json || !uris[record.uri]) return acc
+      const {
+        embeddingRules: { canEmbed },
+      } = parsePostgate({
+        gate: jsonStringToLex(record.json) as PostgateRecord,
+        viewerDid: uriToDid(uris[record.uri].parentUri),
+        authorDid: uriToDid(uris[record.uri].embedUri),
+      })
+      acc.push({
         parentUri: uris[record.uri].parentUri,
         embedUri: uris[record.uri].embedUri,
-        violatesEmbeddingRules: false,
-      }
-    }
-    return {
-      parentUri: uris[record.uri].parentUri,
-      embedUri: uris[record.uri].embedUri,
-      violatesEmbeddingRules: true,
-    }
-  })
+        violatesEmbeddingRules: !canEmbed,
+      })
+      return acc
+    },
+    [] as Array<{
+      parentUri: string
+      embedUri: string
+      violatesEmbeddingRules: boolean
+    }>,
+  )
 }
 
 async function getReplyRefs(db: DatabaseSchema, reply: ReplyRef) {
