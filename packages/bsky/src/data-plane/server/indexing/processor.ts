@@ -128,17 +128,18 @@ export class RecordProcessor<T, S> {
       timestamp: string
     }>,
   ) {
-    for (const { obj, uri } of records) {
+    const validRecords = records.filter(({ obj }) => {
       try {
         this.assertValidRecord(obj)
-      } catch (e) {
-        console.error(`Record ${uri} failed assertion`, { cause: e })
+        return true
+      } catch {
+        return false
       }
-    }
+    })
 
     return this.params.insertBulkFn(
       this.appDb,
-      records as any, // `records.obj` is expected to be T but is unknown; we know it's T due to the assertValidRecord call above
+      validRecords as any, // `records.obj` is expected to be T but is unknown; we know it's T due to the assertValidRecord call above
     )
     // this.aggregateOnCommitBulk(insertedRecords)
 
