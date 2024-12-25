@@ -136,11 +136,11 @@ export class RecordProcessor<T, S> {
       }
     }
 
-    const insertedRecords = await this.params.insertBulkFn(
+    return this.params.insertBulkFn(
       this.appDb,
       records as any, // `records.obj` is expected to be T but is unknown; we know it's T due to the assertValidRecord call above
     )
-    this.aggregateOnCommitBulk(insertedRecords)
+    // this.aggregateOnCommitBulk(insertedRecords)
 
     /* Ignore notifications when bulk inserting */
     // for (const inserted of insertedRecords) {

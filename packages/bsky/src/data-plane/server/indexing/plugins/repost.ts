@@ -127,60 +127,58 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedRepost>> => {
-  const [inserted] = await Promise.all([
-    copyIntoTable(
-      db.pool,
-      'repost',
-      [
-        'uri',
-        'cid',
-        'creator',
-        'subject',
-        'subjectCid',
-        'createdAt',
-        'indexedAt',
-      ],
-      records.map(({ uri, cid, obj, timestamp }) => {
-        const createdAt = normalizeDatetimeAlways(obj.createdAt)
-        const indexedAt = timestamp
-        const sortAt =
-          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
-            ? createdAt
-            : indexedAt
-        return {
-          uri: uri.toString(),
-          cid: cid.toString(),
-          creator: uri.host,
-          subject: obj.subject.uri,
-          subjectCid: obj.subject.cid,
-          createdAt,
-          indexedAt,
-          sortAt,
-        }
-      }),
-    ),
-    copyIntoTable(
-      db.pool,
-      'feed_item',
-      ['type', 'uri', 'cid', 'postUri', 'originatorDid', 'sortAt'],
-      records.map(({ uri, cid, obj, timestamp }) => {
-        const createdAt = normalizeDatetimeAlways(obj.createdAt)
-        const indexedAt = timestamp
-        const sortAt =
-          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
-            ? createdAt
-            : indexedAt
-        return {
-          type: 'post',
-          uri: uri.toString(),
-          cid: cid.toString(),
-          postUri: obj.subject.uri,
-          originatorDid: uri.host,
-          sortAt,
-        }
-      }),
-    ),
-  ])
+  const inserted = await copyIntoTable(
+    db.pool,
+    'repost',
+    [
+      'uri',
+      'cid',
+      'creator',
+      'subject',
+      'subjectCid',
+      'createdAt',
+      'indexedAt',
+    ],
+    records.map(({ uri, cid, obj, timestamp }) => {
+      const createdAt = normalizeDatetimeAlways(obj.createdAt)
+      const indexedAt = timestamp
+      const sortAt =
+        new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+          ? createdAt
+          : indexedAt
+      return {
+        uri: uri.toString(),
+        cid: cid.toString(),
+        creator: uri.host,
+        subject: obj.subject.uri,
+        subjectCid: obj.subject.cid,
+        createdAt,
+        indexedAt,
+        sortAt,
+      }
+    }),
+  )
+  await copyIntoTable(
+    db.pool,
+    'feed_item',
+    ['type', 'uri', 'cid', 'postUri', 'originatorDid', 'sortAt'],
+    records.map(({ uri, cid, obj, timestamp }) => {
+      const createdAt = normalizeDatetimeAlways(obj.createdAt)
+      const indexedAt = timestamp
+      const sortAt =
+        new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+          ? createdAt
+          : indexedAt
+      return {
+        type: 'post',
+        uri: uri.toString(),
+        cid: cid.toString(),
+        postUri: obj.subject.uri,
+        originatorDid: uri.host,
+        sortAt,
+      }
+    }),
+  )
   return inserted
 }
 

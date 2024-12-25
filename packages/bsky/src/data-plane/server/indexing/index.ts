@@ -160,18 +160,12 @@ export class IndexingService {
             console.warn(`No indexer for collection ${collection}`)
             return
           }
-          console.time(`bulk insert ${collection} ${records.length}`)
-          return indexer
-            .insertBulkRecords(records)
-            .catch((e) => {
-              throw new Error(
-                `Failed to bulk insert records for collection ${collection}`,
-                { cause: e },
-              )
-            })
-            .finally(() =>
-              console.timeEnd(`bulk insert ${collection} ${records.length}`),
+          return indexer.insertBulkRecords(records).catch((e) => {
+            throw new Error(
+              `Failed to bulk insert records for collection ${collection}`,
+              { cause: e },
             )
+          })
         }),
         // async () => {
         //   const toInsertRecords = transpose(allRecords, (record) => [

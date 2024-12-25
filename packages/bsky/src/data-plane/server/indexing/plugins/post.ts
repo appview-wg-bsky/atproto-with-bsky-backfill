@@ -363,50 +363,50 @@ const insertBulkFn = async (
     return []
   }
 
-  const invalidReplyUpdates = await Promise.all(
-    insertedPosts.map(async (insertedPost) => {
-      if (insertedPost.replyParent || insertedPost.replyRoot) {
-        const record = records.find((r) => r.uri.href === insertedPost.uri)?.obj
-        if (!record?.reply) return
-
-        const { invalidReplyRoot, violatesThreadGate } = await validateReply(
-          db.db,
-          insertedPost.creator,
-          record.reply,
-        )
-
-        if (invalidReplyRoot || violatesThreadGate) {
-          Object.assign(insertedPost, { invalidReplyRoot, violatesThreadGate })
-          return {
-            uri: insertedPost.uri,
-            invalidReplyRoot,
-            violatesThreadGate,
-          }
-        }
-      }
-    }),
-  )
-
-  const toInsertInvalidReplyUpdates = transpose(
-    invalidReplyUpdates.filter((u) => !!u),
-    ({ uri, invalidReplyRoot, violatesThreadGate }) => [
-      uri,
-      invalidReplyRoot,
-      violatesThreadGate,
-    ],
-  )
-
-  const invalidReplyUpdatesQuery = executeRaw(
-    db.db,
-    `
-    UPDATE post SET "invalidReplyRoot" = v."invalidReplyRoot", "violatesThreadGate" = v."violatesThreadGate"
-    FROM (
-      SELECT * FROM unnest($1::text[], $2::boolean[], $3::boolean[]) AS t(uri, "invalidReplyRoot", "violatesThreadGate")
-    ) as v
-    WHERE post.uri = v.uri
-  `,
-    toInsertInvalidReplyUpdates,
-  )
+  // const invalidReplyUpdates = await Promise.all(
+  //   insertedPosts.map(async (insertedPost) => {
+  //     if (insertedPost.replyParent || insertedPost.replyRoot) {
+  //       const record = records.find((r) => r.uri.href === insertedPost.uri)?.obj
+  //       if (!record?.reply) return
+  //
+  //       const { invalidReplyRoot, violatesThreadGate } = await validateReply(
+  //         db.db,
+  //         insertedPost.creator,
+  //         record.reply,
+  //       )
+  //
+  //       if (invalidReplyRoot || violatesThreadGate) {
+  //         Object.assign(insertedPost, { invalidReplyRoot, violatesThreadGate })
+  //         return {
+  //           uri: insertedPost.uri,
+  //           invalidReplyRoot,
+  //           violatesThreadGate,
+  //         }
+  //       }
+  //     }
+  //   }),
+  // )
+  //
+  // const toInsertInvalidReplyUpdates = transpose(
+  //   invalidReplyUpdates.filter((u) => !!u),
+  //   ({ uri, invalidReplyRoot, violatesThreadGate }) => [
+  //     uri,
+  //     invalidReplyRoot,
+  //     violatesThreadGate,
+  //   ],
+  // )
+  //
+  // const invalidReplyUpdatesQuery = executeRaw(
+  //   db.db,
+  //   `
+  //   UPDATE post SET "invalidReplyRoot" = v."invalidReplyRoot", "violatesThreadGate" = v."violatesThreadGate"
+  //   FROM (
+  //     SELECT * FROM unnest($1::text[], $2::boolean[], $3::boolean[]) AS t(uri, "invalidReplyRoot", "violatesThreadGate")
+  //   ) as v
+  //   WHERE post.uri = v.uri
+  // `,
+  //   toInsertInvalidReplyUpdates,
+  // )
 
   const insertRows: {
     post_embed_image?: Record<
@@ -426,11 +426,10 @@ const insertBulkFn = async (
       string | null | undefined
     >[]
     post_agg_quotedPosts?: Map<string, string>
-    post_updates_violatesEmbeddingRules?: {
-      uri: string
-      violatesEmbeddingRules: boolean
-    }[]
   } = {}
+  const toValidatePostEmbeds: Array<{ parentUri: string; embedUri: string }> =
+    []
+
   for (const post of insertedPosts) {
     const postRecord = records.find((r) => r.uri.toString() === post.uri)
     if (!postRecord) continue
@@ -498,30 +497,26 @@ const insertBulkFn = async (
           insertRows.post_agg_quotedPosts ??= new Map()
           insertRows.post_agg_quotedPosts.set(record.cid, record.uri)
 
-          const { violatesEmbeddingRules } = await validatePostEmbed(
-            db.db,
-            embedUri.toString(),
-            post.uri,
-          )
-          Object.assign(post, { violatesEmbeddingRules })
-          if (violatesEmbeddingRules) {
-            insertRows.post_updates_violatesEmbeddingRules ??= []
-            insertRows.post_updates_violatesEmbeddingRules.push({
-              uri: post.uri,
-              violatesEmbeddingRules,
-            })
-          }
+          toValidatePostEmbeds.push({
+            parentUri: post.uri,
+            embedUri: record.uri,
+          })
         }
       }
     }
   }
 
+  const validatedPostEmbeds = await validatePostEmbedsBulk(
+    db.db,
+    toValidatePostEmbeds,
+  )
+
   const toInsertViolatesEmbeddingRules = transpose(
-    insertRows.post_updates_violatesEmbeddingRules ?? [],
-    (v) => [v.uri, v.violatesEmbeddingRules],
+    validatedPostEmbeds ?? [],
+    (v) => [v.parentUri, v.violatesEmbeddingRules],
   )
   const violatesEmbeddingRulesQuery =
-    insertRows.post_updates_violatesEmbeddingRules?.length &&
+    validatedPostEmbeds?.length &&
     executeRaw(
       db.db,
       `
@@ -535,7 +530,6 @@ const insertBulkFn = async (
     )
 
   await Promise.all([
-    invalidReplyUpdatesQuery,
     insertRows.post_embed_image &&
       copyIntoTable(
         db.pool,
@@ -966,6 +960,51 @@ async function validatePostEmbed(
   return {
     violatesEmbeddingRules: true,
   }
+}
+
+async function validatePostEmbedsBulk(
+  db: DatabaseSchema,
+  embeds: Array<{ parentUri: string; embedUri: string }>,
+) {
+  const uris = embeds.reduce(
+    (acc, { parentUri, embedUri }) => {
+      const postgateRecordUri = embedUri.replace(
+        'app.bsky.feed.post',
+        'app.bsky.feed.postgate',
+      )
+      acc[postgateRecordUri] = { parentUri, embedUri }
+      return acc
+    },
+    {} as Record<string, { parentUri: string; embedUri: string }>,
+  )
+
+  const postgateRecords = await db
+    .selectFrom('record')
+    .where('record.uri', 'in', Object.keys(uris))
+    .selectAll()
+    .execute()
+
+  return postgateRecords.map((record) => {
+    const {
+      embeddingRules: { canEmbed },
+    } = parsePostgate({
+      gate: jsonStringToLex(record.json) as PostgateRecord,
+      viewerDid: uriToDid(uris[record.uri].parentUri),
+      authorDid: uriToDid(uris[record.uri].embedUri),
+    })
+    if (canEmbed) {
+      return {
+        parentUri: uris[record.uri].parentUri,
+        embedUri: uris[record.uri].embedUri,
+        violatesEmbeddingRules: false,
+      }
+    }
+    return {
+      parentUri: uris[record.uri].parentUri,
+      embedUri: uris[record.uri].embedUri,
+      violatesEmbeddingRules: true,
+    }
+  })
 }
 
 async function getReplyRefs(db: DatabaseSchema, reply: ReplyRef) {
