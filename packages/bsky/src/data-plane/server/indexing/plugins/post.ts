@@ -295,11 +295,9 @@ const insertBulkFn = async (
     timestamp: string
   }>,
 ): Promise<IndexedPost[]> => {
-  const client = await db.pool.connect()
-
   const [insertedPosts] = await Promise.all([
     copyIntoTable(
-      client,
+      db.pool,
       'post',
       [
         'uri',
@@ -340,7 +338,7 @@ const insertBulkFn = async (
       }),
     ),
     copyIntoTable(
-      client,
+      db.pool,
       'feed_item',
       ['type', 'uri', 'cid', 'postUri', 'originatorDid', 'sortAt'],
       records.map(({ uri, cid, obj, timestamp }) => {
@@ -540,38 +538,30 @@ const insertBulkFn = async (
     invalidReplyUpdatesQuery,
     insertRows.post_embed_image &&
       copyIntoTable(
-        client,
+        db.pool,
         'post_embed_image',
         ['postUri', 'position', 'imageCid', 'alt'],
         insertRows.post_embed_image,
       ),
     insertRows.post_embed_external &&
       copyIntoTable(
-        client,
+        db.pool,
         'post_embed_external',
         ['postUri', 'uri', 'title', 'description', 'thumbCid'],
         insertRows.post_embed_external,
       ),
     insertRows.post_embed_record &&
       copyIntoTable(
-        client,
+        db.pool,
         'post_embed_record',
         ['postUri', 'embedUri', 'embedCid'],
         insertRows.post_embed_record,
       ),
     insertRows.quote &&
       copyIntoTable(
-        client,
+        db.pool,
         'quote',
-        [
-          'uri',
-          'cid',
-          'subject',
-          'subjectCid',
-          'createdAt',
-          'indexedAt',
-          'sortAt',
-        ],
+        ['uri', 'cid', 'subject', 'subjectCid', 'createdAt', 'indexedAt'],
         insertRows.quote,
       ),
     insertRows.post_agg_quotedPosts?.size &&

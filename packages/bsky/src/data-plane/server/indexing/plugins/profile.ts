@@ -84,10 +84,8 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedProfile>> => {
-  const client = await db.pool.connect()
-
   return copyIntoTable(
-    client,
+    db.pool,
     'profile',
     [
       'uri',
@@ -98,8 +96,6 @@ const insertBulkFn = async (
       'avatarCid',
       'bannerCid',
       'joinedViaStarterPackUri',
-      'pinnedPost',
-      'pinnedPostCid',
       'createdAt',
       'indexedAt',
     ],
@@ -110,13 +106,11 @@ const insertBulkFn = async (
         uri: uri.toString(),
         cid: cid.toString(),
         creator: uri.host,
-        displayName: obj.displayName ?? null,
-        description: obj.description ?? null,
-        avatarCid: obj.avatar?.ref.toString() ?? null,
-        bannerCid: obj.banner?.ref.toString() ?? null,
-        pinnedPost: obj.pinnedPost?.uri ?? null,
-        pinnedPostCid: obj.pinnedPost?.cid ?? null,
-        joinedViaStarterPackUri: obj.joinedViaStarterPack?.uri ?? null,
+        displayName: obj.displayName,
+        description: obj.description,
+        avatarCid: obj.avatar?.ref.toString(),
+        bannerCid: obj.banner?.ref.toString(),
+        joinedViaStarterPackUri: obj.joinedViaStarterPack?.uri,
         createdAt,
         indexedAt,
       }

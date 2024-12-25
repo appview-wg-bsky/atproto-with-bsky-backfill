@@ -80,42 +80,37 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedLike>> => {
-  const client = await db.pool.connect()
-  try {
-    return copyIntoTable(
-      client,
-      'like',
-      [
-        'uri',
-        'cid',
-        'creator',
-        'subject',
-        'subjectCid',
-        'createdAt',
-        'indexedAt',
-      ],
-      records.map(({ uri, cid, obj, timestamp }) => {
-        const createdAt = normalizeDatetimeAlways(obj.createdAt)
-        const indexedAt = timestamp
-        const sortAt =
-          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
-            ? createdAt
-            : indexedAt
-        return {
-          uri: uri.toString(),
-          cid: cid.toString(),
-          creator: uri.host,
-          subject: obj.subject.uri,
-          subjectCid: obj.subject.cid,
-          createdAt,
-          indexedAt,
-          sortAt,
-        }
-      }),
-    )
-  } finally {
-    client.release()
-  }
+  return copyIntoTable(
+    db.pool,
+    'like',
+    [
+      'uri',
+      'cid',
+      'creator',
+      'subject',
+      'subjectCid',
+      'createdAt',
+      'indexedAt',
+    ],
+    records.map(({ uri, cid, obj, timestamp }) => {
+      const createdAt = normalizeDatetimeAlways(obj.createdAt)
+      const indexedAt = timestamp
+      const sortAt =
+        new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+          ? createdAt
+          : indexedAt
+      return {
+        uri: uri.toString(),
+        cid: cid.toString(),
+        creator: uri.host,
+        subject: obj.subject.uri,
+        subjectCid: obj.subject.cid,
+        createdAt,
+        indexedAt,
+        sortAt,
+      }
+    }),
+  )
 }
 
 const findDuplicate = async (

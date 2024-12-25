@@ -1,4 +1,4 @@
-import { InsertObject, RawNode, sql } from 'kysely'
+import { NonNullableInsertKeys, RawNode, sql } from 'kysely'
 import {
   Record as PostRecord,
   ReplyRef,
@@ -7,7 +7,7 @@ import { Record as GateRecord } from '../../lexicon/types/app/bsky/feed/threadga
 import DatabaseSchema, { DatabaseSchemaType } from './db/database-schema'
 import { valuesList } from './db/util'
 import { parseThreadGate } from '../../views/util'
-import { PoolClient } from 'pg'
+import { Pool } from 'pg'
 import { from as copyFrom } from 'pg-copy-streams'
 
 export const getDescendentsQb = (
@@ -187,37 +187,78 @@ export const copyIntoTable = async <
     ? Record<NonNullableInsertKeys<DatabaseSchemaType[Table]>, unknown>[]
     : ['error: columns array is not exhaustive'],
 >(
-  client: PoolClient,
+  pool: Pool,
   table: Table,
   columns: Columns,
   rows: Rows,
 ): Promise<Rows> => {
+  const client = await pool.connect()
+
+  const tempTable = `temp_${table}`
   const columnsStr = columns.map((c) => `"${c}"`).join(', ')
+
+  await client.query(`BEGIN`)
+
+  await client
+    .query(
+      `
+      CREATE TEMP TABLE "${tempTable}" (${columnsStr})
+      ON COMMIT DROP
+      AS SELECT ${columnsStr} FROM "${table}" LIMIT 0
+      WITH NO DATA
+      `,
+    )
+    .catch((e) => {
+      throw new Error(`Failed to create temp table ${tempTable}`, { cause: e })
+    })
+
   const stream = client.query(
     copyFrom(
-      `COPY ${table} (${columnsStr}) FROM STDIN WITH (FORMAT csv, HEADER false, DELIMITER E'\u0007')`,
-      { highWaterMark: 1024 * 1024 * 1024 },
+      `COPY "${tempTable}" (${columnsStr}) FROM STDIN WITH (FORMAT csv, HEADER false, DELIMITER E'\u0007', QUOTE E'\u0006')`,
+      { highWaterMark: 1024 * 1024 },
     ),
   )
 
-  for (const row of rows) {
-    const ok = stream.write(
-      columns
-        .map(
-          (c) =>
-            (typeof row[c] === 'string' ? row[c] : JSON.stringify(row[c])) ??
-            '',
-        )
-        .join('\u0007') + '\n',
+  stream.on('error', (err) => {
+    console.error(
+      `COPY "${tempTable}" (${columnsStr}) FROM STDIN WITH (FORMAT csv, HEADER false, DELIMITER E'\u0007', QUOTE E'\u0006')`,
     )
-    if (!ok) {
-      await new Promise((resolve) => stream.once('drain', resolve))
-    }
-  }
+    console.error(err)
+  })
+
+  stream.write(
+    rows
+      .map((row) =>
+        columns
+          .map((c) =>
+            row[c] != null
+              ? `\u0006${
+                  typeof row[c] === 'string' ? row[c] : JSON.stringify(row[c])
+                }\u0006`
+              : '',
+          )
+          .join('\u0007'),
+      )
+      .join('\n'),
+  )
 
   const promise = new Promise<Rows>((resolve) =>
-    stream.once('finish', () => resolve(rows)),
-  )
+    stream.once('finish', async () => {
+      await client
+        .query(
+          `
+          INSERT INTO "${table}" (${columnsStr})
+          SELECT ${columnsStr} FROM "${tempTable}"
+          ON CONFLICT DO NOTHING
+          `,
+        )
+        .catch((e) => {
+          throw new Error(`Failed to insert into ${table}`, { cause: e })
+        })
+      await client.query(`COMMIT`)
+      resolve(rows)
+    }),
+  ).finally(() => client.release())
   stream.end()
   return promise
 }

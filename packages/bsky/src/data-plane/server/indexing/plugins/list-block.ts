@@ -76,33 +76,23 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedListBlock>> => {
-  const client = await db.pool.connect()
-  try {
-    return copyIntoTable(
-      client,
-      'list_block',
-      ['uri', 'cid', 'creator', 'subjectUri', 'createdAt', 'indexedAt'],
-      records.map(({ uri, cid, obj, timestamp }) => {
-        const createdAt = normalizeDatetimeAlways(obj.createdAt)
-        const indexedAt = timestamp
-        const sortAt =
-          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
-            ? createdAt
-            : indexedAt
-        return {
-          uri: uri.toString(),
-          cid: cid.toString(),
-          creator: uri.host,
-          subjectUri: obj.subject,
-          createdAt,
-          indexedAt,
-          sortAt,
-        }
-      }),
-    )
-  } finally {
-    client.release()
-  }
+  return copyIntoTable(
+    db.pool,
+    'list_block',
+    ['uri', 'cid', 'creator', 'subjectUri', 'createdAt', 'indexedAt'],
+    records.map(({ uri, cid, obj, timestamp }) => {
+      const createdAt = normalizeDatetimeAlways(obj.createdAt)
+      const indexedAt = timestamp
+      return {
+        uri: uri.toString(),
+        cid: cid.toString(),
+        creator: uri.host,
+        subjectUri: obj.subject,
+        createdAt,
+        indexedAt,
+      }
+    }),
+  )
 }
 
 const findDuplicate = async (

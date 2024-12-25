@@ -82,50 +82,40 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedList>> => {
-  const client = await db.pool.connect()
-  try {
-    return copyIntoTable(
-      client,
-      'list',
-      [
-        'uri',
-        'cid',
-        'creator',
-        'name',
-        'purpose',
-        'description',
-        'descriptionFacets',
-        'avatarCid',
-        'createdAt',
-        'indexedAt',
-      ],
-      records.map(({ uri, cid, obj, timestamp }) => {
-        const createdAt = normalizeDatetimeAlways(obj.createdAt)
-        const indexedAt = timestamp
-        const sortAt =
-          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
-            ? createdAt
-            : indexedAt
-        return {
-          uri: uri.toString(),
-          cid: cid.toString(),
-          creator: uri.host,
-          name: obj.name,
-          purpose: obj.purpose,
-          description: obj.description ?? null,
-          descriptionFacets: obj.descriptionFacets
-            ? JSON.stringify(obj.descriptionFacets)
-            : null,
-          avatarCid: obj.avatar?.ref.toString() ?? null,
-          createdAt,
-          indexedAt,
-          sortAt,
-        }
-      }),
-    )
-  } finally {
-    client.release()
-  }
+  return copyIntoTable(
+    db.pool,
+    'list',
+    [
+      'uri',
+      'cid',
+      'creator',
+      'name',
+      'purpose',
+      'description',
+      'descriptionFacets',
+      'avatarCid',
+      'createdAt',
+      'indexedAt',
+    ],
+    records.map(({ uri, cid, obj, timestamp }) => {
+      const createdAt = normalizeDatetimeAlways(obj.createdAt)
+      const indexedAt = timestamp
+      return {
+        uri: uri.toString(),
+        cid: cid.toString(),
+        creator: uri.host,
+        name: obj.name,
+        purpose: obj.purpose,
+        description: obj.description,
+        descriptionFacets: obj.descriptionFacets
+          ? JSON.stringify(obj.descriptionFacets)
+          : undefined,
+        avatarCid: obj.avatar?.ref.toString(),
+        createdAt,
+        indexedAt,
+      }
+    }),
+  )
 }
 
 const findDuplicate = async (): Promise<AtUri | null> => {

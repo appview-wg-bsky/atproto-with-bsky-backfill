@@ -81,10 +81,8 @@ const insertBulkFn = async (
     timestamp: string
   }[],
 ): Promise<Array<IndexedGate>> => {
-  const client = await db.pool.connect()
-
   return copyIntoTable(
-    client,
+    db.pool,
     'post_gate',
     ['uri', 'cid', 'creator', 'postUri', 'createdAt', 'indexedAt'],
     records.map(({ uri, cid, obj, timestamp }) => {

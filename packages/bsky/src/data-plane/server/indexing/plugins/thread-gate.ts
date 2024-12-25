@@ -110,39 +110,23 @@ const insertBulkFn = async (
     }
   }
 
-  const client = await db.pool.connect()
-  try {
-    const [inserted] = await Promise.all([
-      copyIntoTable(
-        client,
-        'thread_gate',
-        ['uri', 'cid', 'creator', 'postUri', 'createdAt', 'indexedAt'],
-        records.map(({ uri, cid, obj, timestamp }) => {
-          const createdAt = normalizeDatetimeAlways(obj.createdAt)
-          const indexedAt = timestamp
-          return {
-            uri: uri.toString(),
-            cid: cid.toString(),
-            creator: uri.host,
-            postUri: obj.post,
-            createdAt,
-            indexedAt,
-          }
-        }),
-      ),
-      executeRaw(
-        db.db,
-        `
-            UPDATE "post" SET "hasThreadGate" = true
-            WHERE "post"."uri" in (SELECT * from unnest($1::text[]))
-          `,
-        records.map(({ uri }) => uri.toString()),
-      ),
-    ])
-    return inserted
-  } finally {
-    client.release()
-  }
+  return copyIntoTable(
+    db.pool,
+    'thread_gate',
+    ['uri', 'cid', 'creator', 'postUri', 'createdAt', 'indexedAt'],
+    records.map(({ uri, cid, obj, timestamp }) => {
+      const createdAt = normalizeDatetimeAlways(obj.createdAt)
+      const indexedAt = timestamp
+      return {
+        uri: uri.toString(),
+        cid: cid.toString(),
+        creator: uri.host,
+        postUri: obj.post,
+        createdAt,
+        indexedAt,
+      }
+    }),
+  )
 }
 
 const findDuplicate = async (
