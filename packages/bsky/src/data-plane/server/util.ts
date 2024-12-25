@@ -226,6 +226,8 @@ export const copyIntoTable = async <
     console.error(err)
   })
 
+  const matchNull = /\u0000/g
+
   stream.write(
     rows
       .map((row) =>
@@ -237,7 +239,8 @@ export const copyIntoTable = async <
                 }\u0006`
               : '',
           )
-          .join('\u0007'),
+          .join('\u0007')
+          .replace(matchNull, ''),
       )
       .join('\n'),
   )
