@@ -293,75 +293,29 @@ const insertBulkFn = async (
     timestamp: string
   }>,
 ): Promise<IndexedPost[]> => {
-  console.time('post: insert posts')
-  const [insertedPosts] = await Promise.all([
-    copyIntoTable(
-      db.pool,
-      'post',
-      [
-        'uri',
-        'cid',
-        'creator',
-        'text',
-        'createdAt',
-        'replyRoot',
-        'replyRootCid',
-        'replyParent',
-        'replyParentCid',
-        'langs',
-        'tags',
-        'indexedAt',
-      ],
-      records.map(({ uri, cid, obj, timestamp }) => {
-        const createdAt = normalizeDatetimeAlways(obj.createdAt)
-        const indexedAt = timestamp
-        const sortAt =
-          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
-            ? createdAt
-            : indexedAt
-        return {
-          uri: uri.toString(),
-          cid: cid.toString(),
-          creator: uri.host,
-          text: obj.text,
-          createdAt,
-          replyRoot: obj.reply?.root.uri ?? null,
-          replyRootCid: obj.reply?.root.cid ?? null,
-          replyParent: obj.reply?.parent.uri ?? null,
-          replyParentCid: obj.reply?.parent.cid ?? null,
-          langs: obj.langs?.length ? obj.langs : null,
-          tags: obj.tags?.length ? obj.tags : null,
-          indexedAt,
-          sortAt,
-        }
-      }),
-    ),
-    copyIntoTable(
-      db.pool,
-      'feed_item',
-      ['type', 'uri', 'cid', 'postUri', 'originatorDid', 'sortAt'],
-      records.map(({ uri, cid, obj, timestamp }) => {
-        const createdAt = normalizeDatetimeAlways(obj.createdAt)
-        const indexedAt = timestamp
-        const sortAt =
-          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
-            ? createdAt
-            : indexedAt
-        return {
-          type: 'post',
-          uri: uri.toString(),
-          cid: cid.toString(),
-          postUri: uri.toString(),
-          originatorDid: uri.host,
-          sortAt,
-        }
-      }),
-    ),
-  ])
-  if (!insertedPosts.length) {
-    return []
-  }
-  console.timeEnd('post: insert posts')
+  const toInsertPosts = records.map(({ uri, cid, obj, timestamp }) => {
+    const createdAt = normalizeDatetimeAlways(obj.createdAt)
+    const indexedAt = timestamp
+    const sortAt =
+      new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+        ? createdAt
+        : indexedAt
+    return {
+      uri: uri.toString(),
+      cid: cid.toString(),
+      creator: uri.host,
+      text: obj.text,
+      createdAt,
+      replyRoot: obj.reply?.root.uri ?? null,
+      replyRootCid: obj.reply?.root.cid ?? null,
+      replyParent: obj.reply?.parent.uri ?? null,
+      replyParentCid: obj.reply?.parent.cid ?? null,
+      langs: obj.langs?.length ? obj.langs : null,
+      tags: obj.tags?.length ? obj.tags : null,
+      indexedAt,
+      sortAt,
+    }
+  })
 
   // const invalidReplyUpdates = await Promise.all(
   //   insertedPosts.map(async (insertedPost) => {
@@ -431,7 +385,7 @@ const insertBulkFn = async (
   // const toValidatePostEmbeds: Array<{ parentUri: string; embedUri: string }> =
   //   []
 
-  for (const post of insertedPosts) {
+  for (const post of toInsertPosts) {
     const postRecord = records.find((r) => r.uri.toString() === post.uri)
     if (!postRecord) continue
     const obj = postRecord.obj
@@ -535,6 +489,46 @@ const insertBulkFn = async (
 
   console.time('post: insert embeds')
   await Promise.all([
+    copyIntoTable(
+      db.pool,
+      'post',
+      [
+        'uri',
+        'cid',
+        'creator',
+        'text',
+        'createdAt',
+        'replyRoot',
+        'replyRootCid',
+        'replyParent',
+        'replyParentCid',
+        'langs',
+        'tags',
+        'indexedAt',
+      ],
+      toInsertPosts,
+    ),
+    copyIntoTable(
+      db.pool,
+      'feed_item',
+      ['type', 'uri', 'cid', 'postUri', 'originatorDid', 'sortAt'],
+      records.map(({ uri, cid, obj, timestamp }) => {
+        const createdAt = normalizeDatetimeAlways(obj.createdAt)
+        const indexedAt = timestamp
+        const sortAt =
+          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+            ? createdAt
+            : indexedAt
+        return {
+          type: 'post',
+          uri: uri.toString(),
+          cid: cid.toString(),
+          postUri: uri.toString(),
+          originatorDid: uri.host,
+          sortAt,
+        }
+      }),
+    ),
     insertRows.post_embed_image &&
       copyIntoTable(
         db.pool,
@@ -591,7 +585,7 @@ const insertBulkFn = async (
   ])
   console.timeEnd('post: insert embeds')
 
-  return insertedPosts.map((post) => ({ post }))
+  return toInsertPosts.map((post) => ({ post }))
 }
 
 const findDuplicate = async (): Promise<AtUri | null> => {
