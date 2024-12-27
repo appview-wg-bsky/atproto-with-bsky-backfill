@@ -314,8 +314,54 @@ const insertBulkFn = async (
       tags: obj.tags?.length ? obj.tags : null,
       indexedAt,
       sortAt,
+      obj,
     }
   })
+
+  // console.time('post: insert posts')
+  await Promise.all([
+    copyIntoTable(
+      db.pool,
+      'post',
+      [
+        'uri',
+        'cid',
+        'creator',
+        'text',
+        'createdAt',
+        'replyRoot',
+        'replyRootCid',
+        'replyParent',
+        'replyParentCid',
+        'langs',
+        'tags',
+        'indexedAt',
+      ],
+      toInsertPosts,
+    ),
+    copyIntoTable(
+      db.pool,
+      'feed_item',
+      ['type', 'uri', 'cid', 'postUri', 'originatorDid', 'sortAt'],
+      records.map(({ uri, cid, obj, timestamp }) => {
+        const createdAt = normalizeDatetimeAlways(obj.createdAt)
+        const indexedAt = timestamp
+        const sortAt =
+          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+            ? createdAt
+            : indexedAt
+        return {
+          type: 'post',
+          uri: uri.toString(),
+          cid: cid.toString(),
+          postUri: uri.toString(),
+          originatorDid: uri.host,
+          sortAt,
+        }
+      }),
+    ),
+  ])
+  // console.timeEnd('post: insert posts')
 
   // const invalidReplyUpdates = await Promise.all(
   //   insertedPosts.map(async (insertedPost) => {
@@ -386,11 +432,7 @@ const insertBulkFn = async (
   //   []
 
   for (const post of toInsertPosts) {
-    const postRecord = records.find((r) => r.uri.toString() === post.uri)
-    if (!postRecord) continue
-    const obj = postRecord.obj
-
-    const postEmbeds = separateEmbeds(obj.embed)
+    const postEmbeds = separateEmbeds(post.obj.embed)
     for (const postEmbed of postEmbeds) {
       if (isEmbedImage(postEmbed)) {
         const { images } = postEmbed
@@ -487,48 +529,8 @@ const insertBulkFn = async (
   //   })
   // console.timeEnd('post: collect embeds')
 
-  console.time('post: insert embeds')
+  // console.time('post: insert embeds')
   await Promise.all([
-    copyIntoTable(
-      db.pool,
-      'post',
-      [
-        'uri',
-        'cid',
-        'creator',
-        'text',
-        'createdAt',
-        'replyRoot',
-        'replyRootCid',
-        'replyParent',
-        'replyParentCid',
-        'langs',
-        'tags',
-        'indexedAt',
-      ],
-      toInsertPosts,
-    ),
-    copyIntoTable(
-      db.pool,
-      'feed_item',
-      ['type', 'uri', 'cid', 'postUri', 'originatorDid', 'sortAt'],
-      records.map(({ uri, cid, obj, timestamp }) => {
-        const createdAt = normalizeDatetimeAlways(obj.createdAt)
-        const indexedAt = timestamp
-        const sortAt =
-          new Date(createdAt).getTime() < new Date(indexedAt).getTime()
-            ? createdAt
-            : indexedAt
-        return {
-          type: 'post',
-          uri: uri.toString(),
-          cid: cid.toString(),
-          postUri: uri.toString(),
-          originatorDid: uri.host,
-          sortAt,
-        }
-      }),
-    ),
     insertRows.post_embed_image &&
       copyIntoTable(
         db.pool,
@@ -583,7 +585,7 @@ const insertBulkFn = async (
         }),
     // violatesEmbeddingRulesQuery,
   ])
-  console.timeEnd('post: insert embeds')
+  // console.timeEnd('post: insert embeds')
 
   return toInsertPosts.map((post) => ({ post }))
 }

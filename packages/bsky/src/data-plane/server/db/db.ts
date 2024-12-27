@@ -44,9 +44,11 @@ export class Database {
       opts.pool ??
       new PgPool({
         connectionString: url,
+        min: 0,
         max: opts.poolSize,
         maxUses: opts.poolMaxUses,
         idleTimeoutMillis: opts.poolIdleTimeoutMs,
+        connectionTimeoutMillis: 60000,
       })
 
     // Select count(*) and other pg bigints as js integer
