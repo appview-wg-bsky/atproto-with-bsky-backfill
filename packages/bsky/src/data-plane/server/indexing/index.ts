@@ -134,7 +134,8 @@ export class IndexingService {
   }
 
   // Takes a map of record arrays indexed by collection name
-  async indexRecordsBulkAcrossCollections(
+  // Does not write to record table, need to call indexRecordsGeneric() afterwards
+  async indexRecordsByCollectionBulk(
     records: Map<
       string,
       Array<{
@@ -167,44 +168,43 @@ export class IndexingService {
             )
           })
         }),
-        // async () => {
-        //   const toInsertRecords = transpose(allRecords, (record) => [
-        //     /* uri: */ record.uri.toString(),
-        //     /* cid: */ record.cid.toString(),
-        //     /* did: */ record.uri.host,
-        //     /* json: */ stringifyLex(record.obj),
-        //     /* indexedAt: */ record.timestamp,
-        //   ])
-        //
-        //   return executeRaw(
-        //     this.db.db,
-        //     `
-        //     INSERT INTO record ("uri", "cid", "did", "json", "indexedAt")
-        //     SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
-        //     ON CONFLICT DO NOTHING
-        //   `,
-        //     toInsertRecords,
-        //   ).catch((e) => {
-        //     console.error(
-        //       `Failed to insert into records table from ${toInsertRecords[0][0]} to ${toInsertRecords[toInsertRecords.length - 1][0]}`,
-        //       e,
-        //     )
-        //   })
-        // },
-        copyIntoTable(
-          this.db.pool,
-          'record',
-          ['uri', 'cid', 'did', 'json', 'indexedAt'],
-          allRecords.map(({ uri, cid, obj, timestamp }) => ({
-            uri: uri.toString(),
-            cid: cid.toString(),
-            did: uri.host,
-            json: stringifyLex(obj),
-            indexedAt: timestamp,
-          })),
-        ),
+        // copyIntoTable(
+        //   this.db.pool,
+        //   'record',
+        //   ['uri', 'cid', 'did', 'json', 'indexedAt'],
+        //   allRecords.map(({ uri, cid, obj, timestamp }) => ({
+        //     uri: uri.toString(),
+        //     cid: cid.toString(),
+        //     did: uri.host,
+        //     json: stringifyLex(obj),
+        //     indexedAt: timestamp,
+        //   })),
+        // ),
       ])
     })
+  }
+
+  async indexRecordsGenericBulk(
+    records: Map<
+      string,
+      Array<{ uri: AtUri; cid: CID; obj: unknown; timestamp: string }>
+    >,
+  ) {
+    const allRecords = [...records.values()].flat()
+    if (!allRecords.length) return
+
+    return copyIntoTable(
+      this.db.pool,
+      'record',
+      ['uri', 'cid', 'did', 'json', 'indexedAt'],
+      allRecords.map(({ uri, cid, obj, timestamp }) => ({
+        uri: uri.toString(),
+        cid: cid.toString(),
+        did: uri.host,
+        json: stringifyLex(obj),
+        indexedAt: timestamp,
+      })),
+    )
   }
 
   async deleteRecord(uri: AtUri, cascading = false) {
