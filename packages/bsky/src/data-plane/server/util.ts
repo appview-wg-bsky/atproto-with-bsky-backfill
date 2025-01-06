@@ -194,7 +194,7 @@ export const copyIntoTable = async <
 ): Promise<Rows> => {
   const client = await pool.connect()
 
-  const tempTable = `temp_${table}`
+  const tempTable = `temp_${table}_${Math.random().toString(36).slice(2)}`
   const columnsStr = columns.map((c) => `"${c}"`).join(', ')
 
   await client.query(`BEGIN`)
