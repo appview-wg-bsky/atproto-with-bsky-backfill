@@ -185,19 +185,15 @@ export class IndexingService {
   }
 
   async indexRecordsGenericBulk(
-    records: Map<
-      string,
-      Array<{ uri: AtUri; cid: CID; obj: unknown; timestamp: string }>
-    >,
+    records: Array<{ uri: AtUri; cid: CID; obj: unknown; timestamp: string }>,
   ) {
-    const allRecords = [...records.values()].flat()
-    if (!allRecords.length) return
+    if (!records.length) return
 
     return copyIntoTable(
       this.db.pool,
       'record',
       ['uri', 'cid', 'did', 'json', 'indexedAt'],
-      allRecords.map(({ uri, cid, obj, timestamp }) => ({
+      records.map(({ uri, cid, obj, timestamp }) => ({
         uri: uri.toString(),
         cid: cid.toString(),
         did: uri.host,
