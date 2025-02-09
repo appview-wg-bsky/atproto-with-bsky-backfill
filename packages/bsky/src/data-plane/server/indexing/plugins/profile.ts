@@ -1,12 +1,12 @@
-import { AtUri } from '@atproto/syntax'
 import { CID } from 'multiformats/cid'
-import * as Profile from '../../../../lexicon/types/app/bsky/actor/profile'
+import { AtUri } from '@atproto/syntax'
 import * as lex from '../../../../lexicon/lexicons'
-import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import RecordProcessor from '../processor'
-import { Database } from '../../db'
+import * as Profile from '../../../../lexicon/types/app/bsky/actor/profile'
 import { BackgroundQueue } from '../../background'
-import { copyIntoTable, executeRaw, transpose } from '../../util'
+import { Database } from '../../db'
+import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
+import { copyIntoTable } from '../../util'
+import RecordProcessor from '../processor'
 
 const lexId = lex.ids.AppBskyActorProfile
 type IndexedProfile = DatabaseSchemaType['profile']
@@ -106,13 +106,15 @@ const insertBulkFn = async (
         uri: uri.toString(),
         cid: cid.toString(),
         creator: uri.host,
-        displayName: obj.displayName,
-        description: obj.description,
-        avatarCid: obj.avatar?.ref?.toString(),
-        bannerCid: obj.banner?.ref?.toString(),
-        joinedViaStarterPackUri: obj.joinedViaStarterPack?.uri,
+        displayName: obj.displayName ?? null,
+        description: obj.description ?? null,
+        avatarCid: obj.avatar?.ref?.toString() ?? null,
+        bannerCid: obj.banner?.ref?.toString() ?? null,
+        joinedViaStarterPackUri: obj.joinedViaStarterPack?.uri ?? null,
         createdAt,
         indexedAt,
+        pinnedPost: obj.pinnedPost?.uri ?? null,
+        pinnedPostCid: obj.pinnedPost?.cid ?? null,
       }
     }),
   )

@@ -1,14 +1,14 @@
 import { Selectable } from 'kysely'
-import { InvalidRequestError } from '@atproto/xrpc-server'
-import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import { CID } from 'multiformats/cid'
-import * as ListItem from '../../../../lexicon/types/app/bsky/graph/listitem'
+import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
+import { InvalidRequestError } from '@atproto/xrpc-server'
 import * as lex from '../../../../lexicon/lexicons'
-import RecordProcessor from '../processor'
+import * as ListItem from '../../../../lexicon/types/app/bsky/graph/listitem'
+import { BackgroundQueue } from '../../background'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { BackgroundQueue } from '../../background'
 import { copyIntoTable } from '../../util'
+import RecordProcessor from '../processor'
 
 const lexId = lex.ids.AppBskyGraphListitem
 type IndexedListItem = Selectable<DatabaseSchemaType['list_item']>
@@ -110,10 +110,15 @@ const insertBulkFn = async (
       'listUri',
       'createdAt',
       'indexedAt',
+      'sortAt',
     ],
     records.map(({ uri, cid, obj, timestamp }) => {
       const createdAt = normalizeDatetimeAlways(obj.createdAt)
       const indexedAt = timestamp
+      const sortAt =
+        new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+          ? createdAt
+          : indexedAt
       return {
         uri: uri.toString(),
         cid: cid.toString(),
@@ -122,6 +127,7 @@ const insertBulkFn = async (
         listUri: obj.list,
         createdAt,
         indexedAt,
+        sortAt,
       }
     }),
   )

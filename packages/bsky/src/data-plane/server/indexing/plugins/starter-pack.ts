@@ -1,13 +1,13 @@
 import { Selectable } from 'kysely'
-import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import { CID } from 'multiformats/cid'
-import * as StarterPack from '../../../../lexicon/types/app/bsky/graph/starterpack'
+import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import * as lex from '../../../../lexicon/lexicons'
+import * as StarterPack from '../../../../lexicon/types/app/bsky/graph/starterpack'
+import { BackgroundQueue } from '../../background'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import RecordProcessor from '../processor'
-import { BackgroundQueue } from '../../background'
 import { copyIntoTable } from '../../util'
+import RecordProcessor from '../processor'
 
 const lexId = lex.ids.AppBskyGraphStarterpack
 type IndexedStarterPack = Selectable<DatabaseSchemaType['starter_pack']>
@@ -73,10 +73,14 @@ const insertBulkFn = async (
   return copyIntoTable(
     db.pool,
     'starter_pack',
-    ['uri', 'cid', 'creator', 'name', 'createdAt', 'indexedAt'],
+    ['uri', 'cid', 'creator', 'name', 'createdAt', 'indexedAt', 'sortAt'],
     records.map(({ uri, cid, obj, timestamp }) => {
       const createdAt = normalizeDatetimeAlways(obj.createdAt)
       const indexedAt = timestamp
+      const sortAt =
+        new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+          ? createdAt
+          : indexedAt
       return {
         uri: uri.toString(),
         cid: cid.toString(),
@@ -84,6 +88,7 @@ const insertBulkFn = async (
         name: obj.name,
         createdAt,
         indexedAt,
+        sortAt,
       }
     }),
   )

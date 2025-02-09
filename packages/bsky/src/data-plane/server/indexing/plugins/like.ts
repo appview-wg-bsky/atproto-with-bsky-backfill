@@ -1,14 +1,14 @@
 import { Selectable, sql } from 'kysely'
-import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import { CID } from 'multiformats/cid'
-import * as Like from '../../../../lexicon/types/app/bsky/feed/like'
+import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import * as lex from '../../../../lexicon/lexicons'
-import RecordProcessor from '../processor'
-import { countAll, excluded } from '../../db/util'
+import * as Like from '../../../../lexicon/types/app/bsky/feed/like'
+import { BackgroundQueue } from '../../background'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { BackgroundQueue } from '../../background'
+import { countAll, excluded } from '../../db/util'
 import { copyIntoTable } from '../../util'
+import RecordProcessor from '../processor'
 
 const lexId = lex.ids.AppBskyFeedLike
 type IndexedLike = Selectable<DatabaseSchemaType['like']>

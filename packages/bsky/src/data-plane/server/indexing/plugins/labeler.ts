@@ -1,13 +1,13 @@
 import { Selectable } from 'kysely'
-import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import { CID } from 'multiformats/cid'
-import * as Labeler from '../../../../lexicon/types/app/bsky/labeler/service'
+import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
 import * as lex from '../../../../lexicon/lexicons'
+import * as Labeler from '../../../../lexicon/types/app/bsky/labeler/service'
+import { BackgroundQueue } from '../../background'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import RecordProcessor from '../processor'
-import { BackgroundQueue } from '../../background'
 import { copyIntoTable } from '../../util'
+import RecordProcessor from '../processor'
 
 const lexId = lex.ids.AppBskyLabelerService
 type IndexedLabeler = Selectable<DatabaseSchemaType['labeler']>
@@ -72,16 +72,21 @@ const insertBulkFn = async (
   return copyIntoTable(
     db.pool,
     'labeler',
-    ['uri', 'cid', 'creator', 'createdAt', 'indexedAt'],
+    ['uri', 'cid', 'creator', 'createdAt', 'indexedAt', 'sortAt'],
     records.map(({ uri, cid, obj, timestamp }) => {
       const createdAt = normalizeDatetimeAlways(obj.createdAt)
       const indexedAt = timestamp
+      const sortAt =
+        new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+          ? createdAt
+          : indexedAt
       return {
         uri: uri.toString(),
         cid: cid.toString(),
         creator: uri.host,
         createdAt,
         indexedAt,
+        sortAt,
       }
     }),
   )

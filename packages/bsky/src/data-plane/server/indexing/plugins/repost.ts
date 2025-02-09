@@ -1,14 +1,14 @@
 import { Selectable, sql } from 'kysely'
 import { CID } from 'multiformats/cid'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
-import * as Repost from '../../../../lexicon/types/app/bsky/feed/repost'
 import * as lex from '../../../../lexicon/lexicons'
-import RecordProcessor from '../processor'
-import { Database } from '../../db'
-import { countAll, excluded } from '../../db/util'
-import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
+import * as Repost from '../../../../lexicon/types/app/bsky/feed/repost'
 import { BackgroundQueue } from '../../background'
+import { Database } from '../../db'
+import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
+import { countAll, excluded } from '../../db/util'
 import { copyIntoTable, executeRaw, transpose } from '../../util'
+import RecordProcessor from '../processor'
 
 const lexId = lex.ids.AppBskyFeedRepost
 type IndexedRepost = Selectable<DatabaseSchemaType['repost']>
