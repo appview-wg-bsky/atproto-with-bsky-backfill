@@ -110,7 +110,6 @@ const insertBulkFn = async (
       'listUri',
       'createdAt',
       'indexedAt',
-      'sortAt',
     ],
     records.map(({ uri, cid, obj, timestamp }) => {
       const createdAt = normalizeDatetimeAlways(obj.createdAt)

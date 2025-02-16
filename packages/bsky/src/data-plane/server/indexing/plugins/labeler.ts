@@ -72,7 +72,7 @@ const insertBulkFn = async (
   return copyIntoTable(
     db.pool,
     'labeler',
-    ['uri', 'cid', 'creator', 'createdAt', 'indexedAt', 'sortAt'],
+    ['uri', 'cid', 'creator', 'createdAt', 'indexedAt'],
     records.map(({ uri, cid, obj, timestamp }) => {
       const createdAt = normalizeDatetimeAlways(obj.createdAt)
       const indexedAt = timestamp
