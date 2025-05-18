@@ -28,14 +28,6 @@ import { RecordWithMedia } from '../../../../views/types'
 import { parsePostgate } from '../../../../views/util'
 import { BackgroundQueue } from '../../background'
 import { Database } from '../../db'
-import {
-  postUriToPostgateUri,
-  postUriToThreadgateUri,
-  uriToDid,
-} from '../../../../util/uris'
-import { parsePostgate } from '../../../../views/util'
-import { BackgroundQueue } from '../../background'
-import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
 import { Notification } from '../../db/tables/notification'
 import { countAll, excluded } from '../../db/util'

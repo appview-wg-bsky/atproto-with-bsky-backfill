@@ -6,6 +6,7 @@ import * as Verification from '../../../../lexicon/types/app/bsky/graph/verifica
 import { BackgroundQueue } from '../../background'
 import { Database } from '../../db'
 import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
+import { copyIntoTable } from '../../util'
 import { RecordProcessor } from '../processor'
 
 const lexId = lex.ids.AppBskyGraphVerification
@@ -35,6 +36,52 @@ const insertFn = async (
     .returningAll()
     .executeTakeFirst()
   return inserted || null
+}
+
+const insertBulkFn = async (
+  db: Database,
+  records: {
+    uri: AtUri
+    cid: CID
+    obj: Verification.Record
+    timestamp: string
+  }[],
+): Promise<Array<IndexedVerification>> => {
+  return copyIntoTable(
+    db.pool,
+    'verification',
+    [
+      'uri',
+      'cid',
+      'rkey',
+      'creator',
+      'subject',
+      'handle',
+      'displayName',
+      'createdAt',
+      'indexedAt',
+    ],
+    records.map(({ uri, cid, obj, timestamp }) => {
+      const createdAt = normalizeDatetimeAlways(obj.createdAt)
+      const indexedAt = timestamp
+      const sortedAt =
+        new Date(createdAt).getTime() < new Date(indexedAt).getTime()
+          ? createdAt
+          : indexedAt
+      return {
+        uri: uri.toString(),
+        cid: cid.toString(),
+        rkey: uri.rkey,
+        creator: uri.host,
+        subject: obj.subject,
+        handle: obj.handle,
+        displayName: obj.displayName,
+        createdAt,
+        indexedAt,
+        sortedAt,
+      }
+    }),
+  )
 }
 
 const findDuplicate = async (
@@ -109,6 +156,7 @@ export const makePlugin = (
   return new RecordProcessor(db, background, {
     lexId,
     insertFn,
+    insertBulkFn,
     findDuplicate,
     deleteFn,
     notifsForInsert,
