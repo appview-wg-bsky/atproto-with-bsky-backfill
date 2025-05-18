@@ -1,16 +1,16 @@
 {
-  "name": "@atproto/bsky",
-  "version": "0.0.149",
+  "name": "@futuristick/atproto-bsky",
+  "version": "0.0.149-insert-batching.0",
   "license": "MIT",
   "description": "Reference implementation of app.bsky App View (Bluesky API)",
   "keywords": [
     "atproto",
     "bluesky"
   ],
-  "homepage": "https://atproto.com",
+  "homepage": "https://zeppelin.social",
   "repository": {
     "type": "git",
-    "url": "https://github.com/bluesky-social/atproto",
+    "url": "https://github.com/appview-wg-bsky/atproto-with-bsky-backfill",
     "directory": "packages/bsky"
   },
   "main": "dist/index.js",
