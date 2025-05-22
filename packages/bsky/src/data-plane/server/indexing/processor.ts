@@ -122,25 +122,35 @@ export class RecordProcessor<T, S> {
 
   async insertBulkRecords(
     records: Array<{
-      uri: AtUri
-      cid: CID
+      did: string
+      path: string
+      cid: string
       obj: unknown
       timestamp: string
     }>,
   ) {
-    const validRecords = records.filter(({ obj }) => {
+    const validRecords: Array<{
+      uri: AtUri
+      cid: CID
+      obj: T
+      timestamp: string
+    }> = []
+    for (const record of records) {
+      const { did, path, cid, obj, timestamp } = record
       try {
         this.assertValidRecord(obj)
-        return true
+        validRecords.push({
+          uri: new AtUri(`at://${did}/${path}`),
+          cid: CID.parse(cid),
+          obj,
+          timestamp,
+        })
       } catch {
-        return false
+        continue
       }
-    })
+    }
 
-    return this.params.insertBulkFn(
-      this.appDb,
-      validRecords as any, // `records.obj` is expected to be T but is unknown; we know it's T due to the assertValidRecord call above
-    )
+    return this.params.insertBulkFn(this.appDb, validRecords)
     // this.aggregateOnCommitBulk(insertedRecords)
 
     /* Ignore notifications when bulk inserting */

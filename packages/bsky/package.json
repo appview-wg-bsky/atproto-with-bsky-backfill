@@ -1,6 +1,6 @@
 {
   "name": "@futuristick/atproto-bsky",
-  "version": "0.0.149-insert-batching.0",
+  "version": "0.0.149-insert-batching.1",
   "license": "MIT",
   "description": "Reference implementation of app.bsky App View (Bluesky API)",
   "keywords": [

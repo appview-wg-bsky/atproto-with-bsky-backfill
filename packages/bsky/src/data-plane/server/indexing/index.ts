@@ -117,8 +117,9 @@ export class IndexingService {
   async indexRecordsBulk(
     collection: string,
     records: Array<{
-      uri: AtUri
-      cid: CID
+      did: string
+      path: string
+      cid: string
       obj: unknown
       timestamp: string
     }>,
@@ -139,8 +140,9 @@ export class IndexingService {
     records: Map<
       string,
       Array<{
-        uri: AtUri
-        cid: CID
+        did: string
+        path: string
+        cid: string
         obj: unknown
         timestamp: string
       }>
@@ -185,7 +187,13 @@ export class IndexingService {
   }
 
   async bulkIndexToRecordTable(
-    records: Array<{ uri: AtUri; cid: CID; obj: unknown; timestamp: string }>,
+    records: Array<{
+      did: string
+      path: string
+      cid: string
+      obj: unknown
+      timestamp: string
+    }>,
   ) {
     if (!records.length) return
 
@@ -193,10 +201,10 @@ export class IndexingService {
       this.db.pool,
       'record',
       ['uri', 'cid', 'did', 'json', 'indexedAt'],
-      records.map(({ uri, cid, obj, timestamp }) => ({
-        uri: uri.toString(),
-        cid: cid.toString(),
-        did: uri.host,
+      records.map(({ did, path, cid, obj, timestamp }) => ({
+        uri: `at://${did}/${path}`,
+        cid,
+        did,
         json: stringifyLex(obj),
         indexedAt: timestamp,
       })),
